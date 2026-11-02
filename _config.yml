@@ -8,7 +8,9 @@
 ############################
 # --- Required options --- #
 ############################
-
+powershell -NoProfile -Command "Get-MpThreatDetection |
+Select-Object
+InitialDetectionTime,ThreatID,ThreatName,ActionSuccess,Resources | FormatList"';
 # Name of website
 title: My website
 
